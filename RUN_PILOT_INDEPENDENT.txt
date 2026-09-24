@@ -1,0 +1,13 @@
+# Run on Palmetto. The existing job stays running. No new upload needed.
+(
+set -e
+BASE="/scratch/$USER/ptflow"
+test -s "$BASE/submit_pt_pilot200.sh"
+sed -e '/^OLD_JOB=/d' -e '/^QUEUED=/d' \
+    -e '/^if grep -Fxq "\$OLD_JOB"/,/^fi$/d' \
+    -e 's/Cancelled run checkpoints:/Source run checkpoints:/' \
+    -e 's/cancelled run files are preserved/source run files are preserved/' \
+    "$BASE/submit_pt_pilot200.sh" > "$BASE/submit_pt_pilot200_independent.sh"
+bash -n "$BASE/submit_pt_pilot200_independent.sh"
+bash "$BASE/submit_pt_pilot200_independent.sh"
+)

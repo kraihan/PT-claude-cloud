@@ -1,0 +1,42 @@
+FIX: inference.py lacks --eval-backend
+
+The earlier launcher unnecessarily required the new engine for every run.
+This fix detects the available CLI and training/OT function arguments from
+your actual source files. It does not replace train.py, inference.py, model
+code, saved checkpoints, datasets or your ablation YAML.
+
+Upload PT-Flow-ablation-compat-fix.zip into /scratch/$USER/ptflow/PT-Flow,
+then run on Palmetto:
+
+source ~/ptflow_env.sh
+cd /scratch/$USER/ptflow/PT-Flow
+unzip -o PT-Flow-ablation-compat-fix.zip
+python scripts/run_six_ablation.py submit configs/ablation/six_h200_4k_wandb.yaml
+squeue -u "$USER"
+
+Your reported failure happened in preflight, before creation/submission of
+jobs. No --resume flag is needed for that failed attempt.
+
+On the older engine the launcher:
+- Uses its existing PNG-based FID evaluation without --eval-backend.
+- Omits unsupported profile_every, feature_cache_gib, compile_generator and
+  extra_ema_decays training options, plus unsupported OT reuse_costs.
+- Requires --init-ema ONLY when init_ema_checkpoint is nonempty. The supplied
+  fresh-run YAML leaves it empty and does not need this newer feature.
+- Records the evaluation backend in plan.json, CSV and Markdown reports.
+- Retains the same six factors, eleven 4k training runs and seventeen FID evals.
+
+On the newer engine the launcher retains streaming FID and its performance
+options. These backends have different execution costs/protocol details;
+compare configurations within the same backend. Legacy FID writes temporary
+PNGs and can take longer. This compatibility fix does not accelerate the old
+training engine itself.
+
+CSV: ../runs/ablation_six_h200_4k_wandb/report/ablation.csv
+W&B project/group settings are taken from your existing YAML. Keep the dual
+local/W&B utils/logging.py supplied in the W&B add-on previously installed.
+No credentials are changed or included in this fix.
+
+The compatibility tests inspect the archived pre-performance PT-Flow engine
+and test the generated commands/configurations without submitting any jobs.
+Actual GPU training/FID has not been run by preparing this fix.

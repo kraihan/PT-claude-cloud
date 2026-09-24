@@ -1,0 +1,52 @@
+PT-FLOW IMAGENET ABLATION: ISOLATED CHECKOUT
+
+This workflow never patches /scratch/$USER/ptflow/PT-Flow. That path remains
+the code used by your running jobs. The installer reads it and makes a separate
+copy at /scratch/$USER/ptflow-ablation/PT-Flow, then applies the ablation
+launcher and BF16/FP32 fix only inside the copy. Its outputs are written under
+/scratch/$USER/ptflow-ablation/runs. Shared datasets/assets remain read-only at
+the paths exported by ~/ptflow_env.sh.
+
+Upload PT-Flow-isolated-ablation-kit.zip to your HOME directory, not into the
+running repository. Then run exactly:
+
+source ~/ptflow_env.sh
+mkdir -p "$HOME/ptflow-isolated-kit"
+unzip -o "$HOME/PT-Flow-isolated-ablation-kit.zip" -d "$HOME/ptflow-isolated-kit"
+
+python "$HOME/ptflow-isolated-kit/install_isolated_ablation.py" \
+  --source "/scratch/$USER/ptflow/PT-Flow" \
+  --destination "/scratch/$USER/ptflow-ablation/PT-Flow"
+
+cd "/scratch/$USER/ptflow-ablation/PT-Flow"
+bash scripts/launch_isolated_ablation.sh
+
+The installer refuses an existing destination; it will not merge into or
+overwrite any tree. For a later clean attempt, choose a new destination such as
+/scratch/$USER/ptflow-ablation-v2/PT-Flow. The relative output paths will then
+automatically stay beside that new checkout.
+
+The launch script requires the isolation marker and verifies it is not running
+from the source tree. It runs the CPU precision regression, then schedules:
+
+  ptin-prepare -> afterok -> ptin-smoke (A100 40 GB)
+                -> afterok -> ptin-dispatch
+                -> 11 independent training jobs + 6 reference evaluations
+
+Preparation reuses the balanced ImageNet subset if it already exists. The A100
+smoke test must pass before the full study is submitted. You may disconnect
+after the launch command returns.
+
+Monitor:
+squeue -u "$USER" -o "%.12i %.32j %.3t %.12M %R"
+
+New reports:
+/scratch/$USER/ptflow-ablation/runs/ablation_imagenet_B_subset50_a100_4k/report/results.csv
+
+Proof that the original source was not changed:
+cat /scratch/$USER/ptflow-ablation/PT-Flow/.ptflow_isolated_ablation.json
+
+The marker records SHA-256 hashes of train.py, ptflow/potential.py and
+utils/precision.py before copying and the hashes in the isolated checkout.
+Running jobs have already imported their modules, but this design also avoids
+changing the files those jobs came from.

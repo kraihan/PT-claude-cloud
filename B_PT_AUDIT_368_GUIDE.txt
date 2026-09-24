@@ -1,0 +1,50 @@
+B_PT_Full checkpoint 368: fixed-weight diagnostic
+
+Upload audit_B_PT_368.py to /scratch/mdraihk/ptflow/audit_B_PT_368.py.
+Then paste these commands into the Palmetto terminal:
+
+source ~/ptflow_env.sh
+python "/scratch/$USER/ptflow/audit_B_PT_368.py" submit
+
+This submits one independent H200 job, named B_PT_audit368, with a two-hour
+limit. It does not train, change the checkpoint, resume the failed job,
+cancel other jobs, or modify the core repository. Submission checks all
+required input paths and refuses a duplicate queued/running audit.
+
+Input checkpoint:
+/scratch/mdraihk/ptflow/active_pt/B_PT_Full_20260924_030649_u9mui_x5/job/B_PT_Full/checkpoints/state_00000368.pt
+
+The job loads raw generator, potential, and scale weights, holds epsilon at
+the checkpoint value, and compares 72 settings:
+  Refinement steps: 0, 8, 32, 64
+  Covariance: learned diagonal, identity (relative to 2*epsilon)
+  Defensive mixture alpha: 0.10, 0.50, 0.75
+  Importance draws K: 16, 64, 128
+There are 32 fixed input noise/label pairs and three proposal repeats.
+K comparisons use nested antithetic pairs. Generator CFG is 1.0, matching
+the potential-training proposal convention, not the FID evaluation CFG.
+
+Find the job ID and logs:
+
+AUDIT=$(cat "/scratch/$USER/ptflow/diagnostics/latest_B_PT_audit368.txt")
+J=$(cat "$AUDIT/job_id.txt")
+squeue -j "$J"
+tail -F "$AUDIT/logs/audit_${J}.out" "$AUDIT/logs/audit_${J}.err"
+
+After completion:
+
+AUDIT=$(cat "/scratch/$USER/ptflow/diagnostics/latest_B_PT_audit368.txt")
+cat "$AUDIT/summary.json"
+printf '%s\n' "$AUDIT/diagnostics.csv"
+
+diagnostics.csv contains ESS, weight concentration, potential estimate
+variability, and refinement residuals, with conditional/null/all cohorts.
+per_sample.csv retains individual observations; manifest.json records the
+protocol. The relative residual always uses the original generator
+displacement in its denominator for comparability across refinement depths.
+
+This is proposal screening, not a FID or normalized-likelihood report.
+High ESS alone does not establish coverage or justify restarting 30K steps.
+Local validation: four tests passed, including exact quadratic estimates,
+antithetic-prefix checks, an end-to-end CPU audit, and Slurm Bash syntax.
+The actual GPU audit must still be submitted on Palmetto.

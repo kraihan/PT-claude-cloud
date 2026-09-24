@@ -1,0 +1,110 @@
+PT-FLOW PARALLEL ABLATION: ONE AVAILABLE GPU PER JOB
+
+The earlier six-job chain enforced one GPU for the whole study. That chain is
+not scientifically required. This launcher requests an independent GPU for
+each experiment, without reserving a 17-GPU node or requiring jobs to start
+together. Slurm can allocate H100, H200, A100 or other available CUDA GPUs.
+Account limits, priority and available resources still determine concurrency.
+
+There are 17 distinct GPU tasks:
+  11 independent training+FID jobs (one reference plus ten training variants).
+   6 evaluation-only jobs (three n variants and three CFG variants).
+The six evaluations reuse the SAME trained reference checkpoint. They wait
+only for its job, unless that checkpoint already exists. No other training
+job depends on another training job. The reference is not trained seven times.
+One final CPU-only job collects CSVs and uploads the combined W&B report.
+
+Files in this patch
+-------------------
+scripts/run_parallel_ablation.py
+scripts/run_six_ablation.py
+tests/test_parallel_ablation.py
+PARALLEL_ABLATION_GUIDE.txt
+
+The existing training engine, ablation YAML, datasets and checkpoints are
+preserved. The parallel launcher reads your already created plan.json so it
+keeps the same 4k budget, hyperparameters, dataset paths and W&B settings.
+It remains compatible with the older PNG-FID engine.
+
+Switch YOUR existing six-job chain to parallel jobs
+--------------------------------------------------
+Upload PT-Flow-parallel-ablation.zip into /scratch/$USER/ptflow/PT-Flow.
+The scancel command below targets ONLY the six ablation IDs you showed.
+It does not cancel the ImageNet/CIFAR training jobs outside this ablation.
+
+source ~/ptflow_env.sh
+cd /scratch/$USER/ptflow/PT-Flow
+unzip -o PT-Flow-parallel-ablation.zip
+
+scancel 16114668 16114669 16114670 16114671 16114672 16114673
+
+python scripts/run_parallel_ablation.py submit \
+  ../runs/ablation_six_h200_4k_wandb/plan.json --gpu any
+
+squeue -u "$USER" -o "%.12i %.30j %.3t %.12M %R"
+
+The launcher waits up to 60 seconds for prior ablation jobs to leave squeue.
+It refuses duplicate submissions while any recorded ablation jobs remain
+active. If teardown takes longer, rerun the submit command after they stop.
+
+--gpu any requests --gpus=1, without a GPU model restriction. You can instead
+use --gpu a100, --gpu h100 or --gpu h200 if the model name is available on your
+cluster. Generic GPU allocation is permitted by Palmetto's Slurm interface:
+https://docs.rcd.clemson.edu/palmetto/job_management/submit/
+
+Each job uses the CPU/memory/time request from your saved plan. The scheduler
+chooses an available GPU; it does not know model VRAM needs in advance. Actual
+GPU model/memory and failures are recorded. Different GPU models can have
+different speed and precision support, so report hardware alongside timing.
+
+Restart behavior
+----------------
+Completed FIDs and final checkpoints are reused. Partial training resumes its
+latest saved local checkpoint. Progress after that checkpoint is not retained
+when a running job is cancelled. Each evaluation has its own output folder.
+Retry with the SAME command after existing ablation jobs finish/cancel.
+The script skips finished tasks and only schedules the remaining work.
+
+CSV reports
+-----------
+Under /scratch/$USER/ptflow/runs/ablation_six_h200_4k_wandb:
+
+report/rows/<result_id>.csv  One self-contained row per finished/failed worker.
+report/results.csv          Combined table: 17 distinct evaluations.
+report/ablation.csv         Six-factor table: 22 rows, sharing the reference.
+report/REPORT.md            Human-readable comparison and interpretation notes.
+results/<result_id>.json    Original evaluator output.
+configs/<arm>.yaml          Full training config for each of the 11 arms.
+parallel/submissions.json   GPU and CPU report job IDs.
+parallel/logs/<jobid>.out   Slurm output for each worker.
+status/task_<result>.json   Worker success/failure and actual GPU hardware.
+
+Each CSV row includes FID, proposal, epsilon, K, proximal weight, n, gamma,
+CFG, EMA decay, training/evaluation seeds, iteration budget, sample count,
+evaluation backend, batch/architecture settings, ESS metrics when available,
+timings, actual GPU where measured, checkpoint and full config JSON/hash.
+Missing results are marked pending/failed; no placeholder FID is invented.
+Training/evaluation GPU fields describe the recorded attempt. Checkpoint
+resumes across GPU models may have mixed hardware histories.
+
+The original 17 evaluations contain 11 training runs x 4000 = 44,000 training
+iterations total. Parallelism changes elapsed time, not this compute budget.
+10k-sample FID remains screening FID; final comparisons need 50k and more seeds.
+
+W&B
+---
+Existing live training runs stay in the same project/group. Each evaluation
+has its own eval/<result_id> run with FID and a CSV/config artifact. Parallel
+workers do not write a shared W&B run or a shared aggregate CSV. The final
+CPU job publishes the combined ablation-report when all GPU tasks have ended.
+
+For an interim combined CSV/report without GPU work, run:
+python scripts/run_parallel_ablation.py report \
+  ../runs/ablation_six_h200_4k_wandb/parallel/plan.json --sync-wandb
+
+Dependency failures: evaluations wait for the reference job to terminate and
+then verify its checkpoint. If it is missing, they report failure rather than
+silently retraining another reference. The CPU report runs after failures too.
+
+Validation is CPU-only with mocked scheduler/GPU/W&B operations. No cluster
+job has been cancelled or submitted by creating this package locally.

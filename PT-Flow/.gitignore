@@ -1,0 +1,41 @@
+# byte-compiled
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# environments
+.venv/
+venv/
+env/
+.python-version
+
+# training artefacts
+runs/
+results/
+wandb/
+outputs/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.npz
+!configs/**/*.npz
+
+# data and downloaded assets
+data/
+*_hf_root/
+torch_hub/
+*.tar.gz
+
+# figures and scratch
+*.png
+!assets/*.png
+*.log
+.ipynb_checkpoints/
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

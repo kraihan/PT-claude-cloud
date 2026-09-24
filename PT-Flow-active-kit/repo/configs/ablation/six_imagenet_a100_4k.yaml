@@ -1,0 +1,128 @@
+# ImageNet-256, B/2 generator, exactly 50 cached training images/class.
+# Use scripts/imagenet_ablation.sh: prepares the subset and checks one GPU first.
+version: 1
+base_config: configs/gen/ptflow_imagenet_B_fresh.yaml
+init_ema_checkpoint: ""
+output_dir: ../runs/ablation_imagenet_B_subset50_a100_4k
+steps: 4000
+seed: 42
+environment:
+  PTFLOW_ASSETS: ../assets
+  PTFLOW_DATA: ../data
+  IMAGENET_CACHE_PATH: ${PTFLOW_DATA}/latents_subset50_seed42
+  IMAGENET_FID_NPZ: ${PTFLOW_ASSETS}/fid_stats/jit_in256_stats.npz
+  VAE_HF_PATH: ${PTFLOW_ASSETS}/sdvae
+  HF_ROOT: ${PTFLOW_ASSETS}/mae
+  TORCH_HUB_DIR: ${PTFLOW_ASSETS}/torch_hub
+slurm:
+  partition: work1
+  account: ""
+  gpu: a100
+  # This validates the conservative budget on an actual 40 GB card.
+  constraint: gpu_a100_40gb
+  cpus: 8
+  memory: 64G
+  time: "24:00:00"
+reference:
+  proposal: defensive_diagonal
+  eps: 0.10
+  K: 8
+  lambda_prox_max: 0.10
+  n: 0
+  cfg_scale: 1.2
+sweeps:
+  proposal: [naive, recentered, diagonal, defensive_diagonal]
+  eps: [0.02, 0.05, 0.10, 0.20]
+  K: [4, 8, 16]
+  lambda_prox_max: [0.0, 0.1, 0.2]
+  n: [0, 1, 2, 4]
+  cfg_scale: [1.0, 1.2, 1.5, 2.0]
+evaluation:
+  num_samples: 10000
+  batch_size: 8                 # VAE decoding uses FP32; keep its peak small.
+  seed: 1234
+  gamma: 0.5
+wandb:
+  enabled: true
+  project: ptflow-ablation
+  entity: null
+  group: imagenet_B_subset50_a100_4k
+  mode: online
+overrides:
+  logging:
+    log_every_k: 20
+  dataset:
+    batch_size: 256
+    eval_batch_size: 8
+    subset_per_class: 50        # Recorded/checked by launcher; no engine change.
+    subset_seed: 42
+    kwargs:
+      num_workers: 4
+  model:
+    precision: bf16
+    use_bf16: true
+    use_remat: true
+    attn_fp32: false
+  optimizer:
+    fused: auto
+    lr_schedule:
+      learning_rate: 0.0001
+      warmup_steps: 200
+      lr_schedule: const
+  train:
+    train_batch_size: 8         # Eight labels; 128 generated images per step.
+    grad_accum_steps: 8         # One label x 16 generated images per microbatch.
+    pos_per_sample: 16
+    neg_per_sample: 8
+    positive_bank_size: 50
+    negative_bank_size: 1000
+    forward_dict:
+      gen_per_label: 16
+    push_per_step: 256
+    push_at_resume: 20
+    ema_decay: 0.999
+    extra_ema_decays: []
+    compile_generator: false
+    feature_cache_gib: 1.0
+    feature_chunk_size: 8
+    profile_every: 100
+    ot_kwargs:
+      reuse_costs: true
+  feature:
+    # Reuse the MAE-640 from the existing ImageNet setup; do not fall back to pixels.
+    mae_path: hf://mae_latent_640
+    chunk_size: 8
+    checkpoint: true
+  pt:
+    enabled: true
+    noise_bsz: 8
+    data_bsz: 8
+    potential_chunk: 8
+    prox_max_batch: 8
+    scale_K: 4
+    prox_mode: detach
+    curv_probe: false
+    logw_clip: 0.0
+    model:
+      cond_dim: 256
+      hidden_size: 256
+      depth: 4
+      num_heads: 4
+      patch_size: 2
+    scale_model:
+      cond_dim: 128
+      hidden_size: 128
+      depth: 2
+      num_heads: 4
+      patch_size: 2
+    optimizer:
+      fused: auto
+      lr_schedule:
+        warmup_steps: 200
+        lr_schedule: const
+    schedule:
+      prox_warmup: 500
+      prox_ramp: 1000
+      theta_period: 1
+      theta_period_degraded: 2
+      lambda_curv: 0.0

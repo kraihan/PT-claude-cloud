@@ -1,0 +1,69 @@
+Next experiment: isolated covariance calibration at failed checkpoint 368
+
+Upload calibrate_B_PT_368.py to:
+/scratch/mdraihk/ptflow/calibrate_B_PT_368.py
+
+Run on the Palmetto login terminal:
+
+source ~/ptflow_env.sh
+python "/scratch/$USER/ptflow/calibrate_B_PT_368.py" submit
+
+The command finds audit_B_PT_368.py from the previous successful audit's
+latest_B_PT_audit368.txt pointer and copies both helper and launcher into a
+new output folder. No new package installation is required. It requests one
+H200, 64G host RAM, and a two-hour wall-time limit in work1.
+
+Job name: B_PT_scale368
+
+What runs:
+  1. Read raw checkpoint state_00000368.pt from the confirmed B_PT_Full folder.
+  2. Freeze the generator and potential; hold checkpoint epsilon fixed.
+  3. Prepare 128 fit pairs and 64 independent held-out noise/label pairs.
+     Refine their proposal means for 64 steps with the frozen potential.
+  4. Evaluate the existing scale on the held-out inputs.
+  5. Update ONLY the copied scale network in memory for 500 steps.
+     AdamW LR=0.0003, weight decay=0, batch=4, eight antithetic draws.
+     Objective is reverse KL up to additive constants, divided by dimension.
+     No importance-weight clipping or health-threshold changes are used.
+  6. Evaluate the fitted scale on exactly the same held-out inputs and
+     sampling seeds. Report K=16/64/128, alpha=0.10/0.75 and variance
+     multipliers=0.25/0.5/1/2, before and after fitting.
+
+The fit never uses the held-out inputs, their metrics, or any early-stopping
+selection. Primary comparison is multiplier=1 and alpha=0.10. The multiplier
+grid is exploratory. Conditional and null-conditioned results are separate.
+The conditional/null split is prespecified from the configured dropout rate.
+
+The generator/potential are not retrained. The source checkpoint and core
+files are not overwritten. The script verifies source checkpoint metadata,
+generator/potential parameter versions, absent parameter gradients, and
+unchanged schedule after running. The candidate scale is saved separately
+as scale_candidate.pt, which is NOT a resumable PT-Flow checkpoint.
+
+Monitor:
+
+CAL=$(cat "/scratch/$USER/ptflow/diagnostics/latest_B_PT_scale368.txt")
+J=$(cat "$CAL/job_id.txt")
+squeue -j "$J"
+tail -F "$CAL/logs/scale_${J}.out" "$CAL/logs/scale_${J}.err"
+
+After it finishes, send this summary:
+
+CAL=$(cat "/scratch/$USER/ptflow/diagnostics/latest_B_PT_scale368.txt")
+cat "$CAL/summary.json"
+echo "$CAL/diagnostics.csv"
+
+Outputs: summary.json, diagnostics.csv, per_sample.csv, fit_trace.csv,
+inputs.pt, manifest.json, scale_candidate.pt, job_id.txt, logs/.
+
+Interpretation:
+The primary screen asks for mean control ESS >=0.30 and <=10% near-one-draw
+events at K16 and K128, separately for conditional and null inputs. This is
+only a small screening experiment, not proof of coverage or convergence.
+Even if it passes, the next step is a bounded training pilot beyond the
+observed failure at step 368. It never submits a 30K training restart.
+If it fails, scale-only calibration with this budget has not repaired the
+estimator; increasing the full-training budget is not justified by this test.
+
+There is no FID computation and no W&B login change in this diagnostic.
+Evaluation can be examined directly through the CSV and Slurm log.

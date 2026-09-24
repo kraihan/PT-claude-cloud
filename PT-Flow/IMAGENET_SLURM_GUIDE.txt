@@ -1,0 +1,68 @@
+PALMETTO NATIVE BATCH SUBMISSION: IMAGENET ABLATION
+
+Official commands
+-----------------
+sbatch: submit a background batch job and return its ID.
+srun: launch the program within its allocated batch job.
+--dependency=afterok:JOBID: start only after JOBID succeeds.
+--kill-on-invalid-dep=yes: cancel the dependent job if that prerequisite fails.
+
+The earlier imagenet_ablation.sh already used sbatch/srun, but sbatch --wait
+kept its local shell waiting between stages. The new submit_imagenet_slurm.py
+uses Slurm dependencies instead. After submission you can disconnect from SSH.
+No CPU/GPU allocation is kept idle just to wait for another job in the queue.
+
+Your existing preparation job is 16115552. Do not submit a second preparation
+while it runs. Use the reuse command below. If the earlier bash launcher is
+still waiting in another terminal, stop THAT LOCAL COMMAND first (Ctrl+C) so
+two launchers cannot schedule the next stage. Check squeue/sacct afterwards;
+the new launcher refuses to adopt a failed/cancelled preparation. If it is
+already running ptin-smoke or the ablation jobs, let that workflow continue
+instead of submitting this one too.
+
+Upload PT-Flow-imagenet-slurm-scheduler.zip to your PT-Flow directory, then:
+
+source ~/ptflow_env.sh
+cd /scratch/$USER/ptflow/PT-Flow
+unzip -o PT-Flow-imagenet-slurm-scheduler.zip
+python scripts/submit_imagenet_slurm.py --prepare-job 16115552
+
+The command accepts an active preparation or a successfully completed one.
+It queues these remaining stages and returns immediately:
+  ptin-smoke     one A100 40 GB; after successful preparation
+  ptin-dispatch  one CPU; after successful smoke test
+
+When ptin-dispatch runs, it submits 17 one-A100 ablation jobs and a CPU report
+job through the existing parallel launcher. Eleven training jobs can run
+independently; six evaluation jobs depend only on the reference checkpoint.
+These initial dependencies do not serialize the 11 independent trainings.
+
+For a NEW workflow, with no old preparation/smoke/ablation jobs active:
+python scripts/submit_imagenet_slurm.py
+
+This queues ptin-prepare -> ptin-smoke -> ptin-dispatch immediately; the first
+stage may reuse an already prepared matching subset. No --wait or tmux needed.
+
+Monitor:
+squeue -u "$USER" -o "%.12i %.32j %.3t %.12M %R"
+
+Setup logs and submission IDs:
+/scratch/$USER/ptflow/runs/ablation_imagenet_B_subset50_a100_4k_setup/
+  slurm_workflow.json
+  ptin-prepare_<jobid>.log    (new preparation jobs only)
+  ptin-smoke_<jobid>.log
+  ptin-dispatch_<jobid>.log
+For existing job 16115552, its original log is prep_16115552.log.
+
+Scientific settings, subset, 4k budget, CSV files and W&B group are unchanged:
+  /scratch/$USER/ptflow/runs/ablation_imagenet_B_subset50_a100_4k/report/results.csv
+  W&B project: ptflow-ablation
+  W&B group: imagenet_B_subset50_a100_4k
+
+The launcher records each submitted ID and refuses duplicate active workflows.
+It does not cancel or modify your long-running ImageNet/CIFAR training jobs.
+No jobs have been submitted remotely by creating this local package.
+
+Official references:
+https://docs.rcd.clemson.edu/palmetto/job_management/submit/
+https://slurm.schedmd.com/sbatch.html

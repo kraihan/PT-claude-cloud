@@ -1,0 +1,23 @@
+torch>=2.4
+torchvision>=0.19
+diffusers==0.29.1
+transformers==4.46.1
+huggingface_hub>=0.24.7,<1.0
+safetensors
+accelerate
+einops
+PyYAML
+absl-py
+scipy
+Pillow
+pytest
+tqdm==4.67.3
+wandb==0.25.1
+jax==0.4.31
+jaxlib==0.4.31
+flax==0.8.5
+numpy==1.26.4
+torch-fidelity
+wheel
+psutil
+# flash-attn is unnecessary; PyTorch SDPA supports T4 and newer GPUs.

@@ -1,0 +1,532 @@
+PT-FLOW PALMETTO ABLATION JOB TRACKER
+Recorded: 2026-09-21
+User: mdraihk
+
+======================================================================
+STUDY A: EPS_MIN, 4K TRAINING, FINAL FID-50K, A100
+======================================================================
+
+Experiment root:
+/scratch/mdraihk/ptflow-ablation/runs/ablation_imagenet_B_subset50_epsmin_4k_fid50k
+
+Jobs:
+16116649  eps_min=0.20         pt6p-epsmin_0p20
+16116650  eps_min=0.10         pt6p-epsmin_0p10
+16116651  eps_min=0.05 (ours)  pt6p-epsmin_0p05_ours
+16116652  eps_min=0.02         pt6p-epsmin_0p02
+16116653  final CPU report     pt6p-report; waits for 16116649-16116652
+
+Final CSV:
+/scratch/mdraihk/ptflow-ablation/runs/ablation_imagenet_B_subset50_epsmin_4k_fid50k/report/ablation.csv
+
+Per-arm CSV directory:
+/scratch/mdraihk/ptflow-ablation/runs/ablation_imagenet_B_subset50_epsmin_4k_fid50k/report/rows
+
+Slurm logs:
+/scratch/mdraihk/ptflow-ablation/runs/ablation_imagenet_B_subset50_epsmin_4k_fid50k/parallel/logs
+
+W&B group:
+imagenet_B_subset50_epsmin_4k_fid50k
+
+======================================================================
+STUDY B: K, 1K FAST TRAINING, A100
+======================================================================
+
+Experiment root:
+/scratch/mdraihk/ptflow-ablation/runs/ablation_imagenet_B_subset50_K_fast_1k_a100
+
+Jobs:
+16116807  K=2                 pt6p-K_2
+16116808  K=4                 pt6p-K_4
+16116809  K=8                 pt6p-K_8
+16116810  K=16                pt6p-K_16
+16116811  final CPU report    pt6p-report; waits for 16116807-16116810
+
+Final CSV:
+/scratch/mdraihk/ptflow-ablation/runs/ablation_imagenet_B_subset50_K_fast_1k_a100/report/ablation.csv
+
+Per-arm CSV directory:
+/scratch/mdraihk/ptflow-ablation/runs/ablation_imagenet_B_subset50_K_fast_1k_a100/report/rows
+
+Slurm logs:
+/scratch/mdraihk/ptflow-ablation/runs/ablation_imagenet_B_subset50_K_fast_1k_a100/parallel/logs
+
+W&B group:
+imagenet_B_subset50_K_fast_1k_a100
+
+Cancelled superseded K study:
+16116617 K=2, 16116618 K=4, 16116619 K=8, 16116620 K=16,
+16116621 old report.
+
+======================================================================
+STUDY C: EPS SCHEDULE x CFG-W x ALPHA_DEF, 1K, FINAL FID-50K, A100
+======================================================================
+
+Isolated code checkout:
+/scratch/mdraihk/ptflow-ablation-12-fast/PT-Flow
+
+Experiment root:
+/scratch/mdraihk/ptflow-ablation-12-fast/runs/ablation_imagenet_B_subset50_schedule_w_alpha_1k_fid50k
+
+Epsilon-schedule jobs (train 1K, then FID-50K):
+16116793  constant             pt6p-eps_schedule_constant
+16116794  linear               pt6p-eps_schedule_linear
+16116795  cosine (ours)        pt6p-reference
+16116796  exponential          pt6p-eps_schedule_exp
+
+CFG-w jobs (FID-50K from shared job 16116795 checkpoint):
+16116797  w=1.0                pt6p-w_1p0; depends on 16116795
+16116798  w=1.2 (ours)         pt6p-w_1p2_ours; depends on 16116795
+16116799  w=1.5                pt6p-w_1p5; depends on 16116795
+16116800  w=2.0                pt6p-w_2p0; depends on 16116795
+
+Alpha_def jobs:
+16116801  alpha_def=0.0        train 1K, then FID-50K
+16116802  alpha_def=0.01       train 1K, then FID-50K
+16116803  alpha_def=0.1        train 1K, then FID-50K
+16116804  0.1 -> 0.01 (ours)  FID-50K from shared job 16116795 checkpoint;
+                                depends on 16116795
+
+Report:
+16116805  final CPU report; waits for all jobs 16116793-16116804
+
+Final CSV:
+/scratch/mdraihk/ptflow-ablation-12-fast/runs/ablation_imagenet_B_subset50_schedule_w_alpha_1k_fid50k/report/ablation.csv
+
+Per-arm CSV directory:
+/scratch/mdraihk/ptflow-ablation-12-fast/runs/ablation_imagenet_B_subset50_schedule_w_alpha_1k_fid50k/report/rows
+
+Slurm logs:
+/scratch/mdraihk/ptflow-ablation-12-fast/runs/ablation_imagenet_B_subset50_schedule_w_alpha_1k_fid50k/parallel/logs
+
+W&B group:
+imagenet_B_subset50_schedule_w_alpha_1k_fid50k
+
+======================================================================
+MONITORING COMMANDS
+======================================================================
+
+All relevant jobs:
+squeue -j 16116649,16116650,16116651,16116652,16116653,16116793,16116794,16116795,16116796,16116797,16116798,16116799,16116800,16116801,16116802,16116803,16116804,16116805,16116807,16116808,16116809,16116810,16116811 -o "%.12i %.32j %.3t %.12M %R"
+
+Accounting, including completed or failed jobs:
+sacct -X -j 16116649,16116650,16116651,16116652,16116653,16116793,16116794,16116795,16116796,16116797,16116798,16116799,16116800,16116801,16116802,16116803,16116804,16116805,16116807,16116808,16116809,16116810,16116811 --format=JobID,JobName%32,State,ExitCode,Elapsed
+
+List generated per-arm rows at any time:
+find /scratch/mdraihk/ptflow-ablation/runs/ablation_imagenet_B_subset50_epsmin_4k_fid50k/report/rows -maxdepth 1 -type f -name '*.csv' -print
+find /scratch/mdraihk/ptflow-ablation/runs/ablation_imagenet_B_subset50_K_fast_1k_a100/report/rows -maxdepth 1 -type f -name '*.csv' -print
+find /scratch/mdraihk/ptflow-ablation-12-fast/runs/ablation_imagenet_B_subset50_schedule_w_alpha_1k_fid50k/report/rows -maxdepth 1 -type f -name '*.csv' -print
+
+The three report jobs have the same Slurm name. Identify them by job ID:
+16116653 = eps_min report
+16116805 = schedule/w/alpha report
+16116811 = K report
+
+======================================================================
+STUDY D: CIFAR-10 20-ROW ABLATION, 10K TRAINING, FINAL FID-50K, A100
+======================================================================
+
+Recorded: 2026-09-22
+
+Isolated code checkout:
+/scratch/mdraihk/ptflow-cifar20/PT-Flow
+
+Experiment root:
+/scratch/mdraihk/ptflow-cifar20/runs/cifar10_20way_10k_fid50k
+
+Epsilon-minimum panel:
+16128045  eps_min=0.20         pt6p-epsmin_0p2; train 10K
+16128046  eps_min=0.10         pt6p-epsmin_0p1; train 10K
+16128047  eps_min=0.05         pt6p-reference; train 10K, shared central checkpoint
+16128048  eps_min=0.02         pt6p-epsmin_0p02; train 10K
+
+K panel:
+16128049  K=4                  pt6p-K_4; train 10K
+16128050  K=8                  pt6p-K_8; evaluate shared job 16128047 checkpoint
+16128051  K=16                 pt6p-K_16; train 10K
+16128052  K=32                 pt6p-K_32; train 10K
+
+Alpha_def panel:
+16128053  alpha_def=0.0        pt6p-alpha_def_0p0; train 10K
+16128054  alpha_def=0.01       pt6p-alpha_def_0p01; train 10K
+16128055  alpha_def=0.1        pt6p-alpha_def_0p1; train 10K
+16128056  0.1 -> 0.01         pt6p-alpha_schedule_ours; evaluate shared checkpoint
+
+CFG-w panel (sampling-only from shared job 16128047 checkpoint):
+16128057  w=1.0                pt6p-w_1p0
+16128058  w=1.2                pt6p-w_1p2_ours
+16128059  w=1.5                pt6p-w_1p5
+16128060  w=2.0                pt6p-w_2p0
+
+Epsilon-schedule panel:
+16128061  constant             pt6p-eps_schedule_constant; train 10K
+16128062  linear               pt6p-eps_schedule_linear; train 10K
+16128063  cosine              pt6p-eps_schedule_cosine; evaluate shared checkpoint
+16128064  exponential         pt6p-eps_schedule_exp; train 10K
+
+Reports:
+16128065  full provenance report; waits for all twenty GPU tasks
+16128066  final slim CSV; waits for job 16128065
+
+Final three-column CSV (ablation,value,fid):
+/scratch/mdraihk/ptflow-cifar20/runs/cifar10_20way_10k_fid50k/report/ablation.csv
+
+Full provenance CSV:
+/scratch/mdraihk/ptflow-cifar20/runs/cifar10_20way_10k_fid50k/report/full_results.csv
+
+Per-result CSV directory:
+/scratch/mdraihk/ptflow-cifar20/runs/cifar10_20way_10k_fid50k/report/rows
+
+Slurm logs:
+/scratch/mdraihk/ptflow-cifar20/runs/cifar10_20way_10k_fid50k/parallel/logs
+
+W&B group:
+cifar10_20way_10k_fid50k
+
+Monitor this study:
+squeue -j 16128045,16128046,16128047,16128048,16128049,16128050,16128051,16128052,16128053,16128054,16128055,16128056,16128057,16128058,16128059,16128060,16128061,16128062,16128063,16128064,16128065,16128066 -o "%.12i %.32j %.3t %.12M %R"
+
+Accounting after jobs leave squeue:
+sacct -X -j 16128045,16128046,16128047,16128048,16128049,16128050,16128051,16128052,16128053,16128054,16128055,16128056,16128057,16128058,16128059,16128060,16128061,16128062,16128063,16128064,16128065,16128066 --format=JobID,JobName%32,State,ExitCode,Elapsed
+
+======================================================================
+STUDY E: INDEPENDENT ACTIVE-PT 200-STEP PILOT + QUEUE SNAPSHOT
+======================================================================
+
+Recorded: 2026-09-24
+Source: user-pasted squeue --me output. These are snapshot states, not live status.
+User: mdraihk; partition: work1; one node for each listed job.
+Names in the snapshot are truncated by squeue; only the pilot's full name is known here.
+
+Job ID    Displayed name  State  Elapsed     Node / pending reason
+16198722  pt-B-pil        PD     0:00        Priority
+16196733  ptf-late        PD     0:00        Priority
+16196732  ptf-prox        PD     0:00        Priority
+16196731  ptf-mech        PD     0:00        Priority
+16169695  pt-L-scr        R      6:36:06     nodeai07
+16165327  pt-Bw-H2        R      15:27:49    node0110
+16179565  pt-B-act        R      6:46:38     nodeai10
+16186264  w_pt-B-a        R      4:32:23     node0107
+16065647  pt-cifar        R      1-12:02:31  node0416
+
+User instruction: KEEP job 16179565 running to obtain its first checkpoint.
+The earlier cancellation assumption is superseded. Do not cancel it for the pilot.
+Other listed jobs remain untouched.
+
+Pilot job: 16198722
+Full name: pt-B-pilot200
+Submission: independent; no Slurm dependency on 16179565.
+Requested allocation: 2 H200 GPUs, 16 CPUs, 256G host memory, 8 hours.
+200 training steps, fresh step 0 / fresh optimizer and PT state.
+Initializer: W-Flow B 200K EMA generator weights only:
+/scratch/mdraihk/ptflow/baseline_wflow/checkpoints/latent_sota_B_ot/state_00200000.pt
+
+Pilot launcher on cluster:
+/scratch/mdraihk/ptflow/submit_pt_pilot200_independent.sh
+
+Read-only source configuration/code, also used by existing active run:
+/scratch/mdraihk/ptflow/active_pt/B_H200x2_30k_20260923_141250/active_B_30k.yaml
+/scratch/mdraihk/ptflow/active_pt/B_H200x2_30k_20260923_141250/PT-Flow
+
+Existing active-run outputs (job 16179565):
+/scratch/mdraihk/ptflow/active_pt/B_H200x2_30k_20260923_141250/run
+Checkpoint directory: same path + /checkpoints
+
+Pilot output directory is uniquely created at submission:
+/scratch/mdraihk/ptflow/active_pt/B_pilot200_<timestamp>_<suffix>
+Exact directory has not been pasted by the user; do not invent the suffix.
+Its latest-submission pointer is:
+/scratch/mdraihk/ptflow/active_pt/latest_pilot.txt
+Verify <pilot>/job_id.txt equals 16198722; a later submission can replace the pointer.
+
+Paths relative to the pilot directory:
+  job_id.txt                          job ID
+  pilot.yaml                          exact training config
+  plan.json                           training/evaluation settings
+  logs/pilot_16198722.out              stdout
+  logs/pilot_16198722.err              stderr
+  run/checkpoints/state_00000200.pt    final training checkpoint
+  run/pt_status.json                  latest PT diagnostics
+  run/pt_status.csv                   PT diagnostic history
+  report/fid.csv                      initializer EMA / pilot EMA / pilot raw FID
+  report/diagnostics.json             health, coupling, timing and completion summary
+
+Pilot settings:
+  ImageNet latent B; global generated batch 1024; gradient accumulation 4.
+  K=16; epsilon held at 0.1 intentionally for this diagnostic.
+  Prox warmup 20; ramp 80; lambda_prox_max 0.02.
+  Saves at 50, 100, 150, 200 steps.
+  FID-10K, mode A, CFG 1.2, seed 42; compare initializer EMA, pilot EMA and pilot raw.
+  W&B project: ptflow-active-diagnostic.
+  No automatic 30K continuation; FID-10K is screening, not paper FID-50K.
+
+Monitor known jobs without changing them:
+squeue -j 16198722,16196733,16196732,16196731,16169695,16165327,16179565,16186264,16065647 -o "%.12i %.32j %.3t %.12M %R"
+
+Recover the exact pilot directory by job ID if latest_pilot.txt changes:
+python -c 'from pathlib import Path; root=Path("/scratch/mdraihk/ptflow/active_pt"); print("\n".join(str(p.parent) for p in root.glob("B_pilot200_*/job_id.txt") if p.read_text().strip()=="16198722"))'
+
+Accounting after the pilot leaves squeue:
+sacct -X -j 16198722 --format=JobID,JobName%32,State,ExitCode,Elapsed,NodeList
+
+Prepared independent cosine-epsilon comparison (2026-09-24):
+  Submission confirmed by user: job 16199241 (pt-B-epscos200).
+  Both pilots completed successfully, confirmed by user-pasted sacct output below.
+  Name: pt-B-epscos200; 200 steps; 2 H200 GPUs; no dependency.
+  Epsilon: cosine 0.10 -> 0.05; warmup 20; anneal 160; floor at completed step 180.
+  Same other training/FID settings and W-Flow weights-only initializer as 16198722.
+  Existing 16198722 remains the constant-epsilon 0.10 comparison.
+  Launcher: /scratch/mdraihk/ptflow/submit_pt_epscos200.sh
+  New directory pattern: /scratch/mdraihk/ptflow/active_pt/B_epscos200_<timestamp>_<suffix>
+  Separate pointer: /scratch/mdraihk/ptflow/active_pt/latest_epscos_pilot.txt
+  Per-run job_id.txt records the new ID after submission.
+  Reports: <new directory>/report/fid.csv and report/diagnostics.json
+  Logs: <new directory>/logs/pilot_<new job ID>.out and .err
+  No existing job is cancelled or changed.
+  Local copy-and-submit commands: SCHEDULE_EPSCOS_200.txt
+
+Pilot pair for accounting:
+  16198722  pt-B-pilot200   constant epsilon 0.10
+  16199241  pt-B-epscos200  cosine epsilon 0.10 -> 0.05
+sacct -X -j 16198722,16199241 --format=JobID,JobName%24,State,ExitCode,Elapsed,NodeList
+
+Pilot accounting results (user-pasted sacct):
+  16198722  pt-B-pilot200   COMPLETED  ExitCode=0:0  Elapsed=00:32:35  nodeai08
+  16199241  pt-B-epscos200  COMPLETED  ExitCode=0:0  Elapsed=00:32:15  nodeai08
+These elapsed times cover the entire jobs, including initialization and FID evaluations;
+they are not training-only timings. The user subsequently provided fid.csv,
+diagnostics.json, latest pt_status.json and the exact directories recorded below.
+
+Completed pilot results (received 2026-09-24):
+  Protocol: ImageNet-256 latent B, FID-10K, mode A / one generator call,
+  CFG 1.2, seed 42, 2 ranks, gen_bsz=32, streaming Inception-v3-compat.
+  FID reference: /scratch/mdraihk/ptflow/assets/fid_stats/jit_in256_stats.npz
+  These are screening FIDs, not FID-50K paper results.
+
+16198722 constant epsilon directory:
+/scratch/mdraihk/ptflow/active_pt/B_pilot200_20260923_222358_XSwPyU
+  Initializer EMA FID: 4.067562743239819
+  Pilot EMA FID:       4.070284984831915
+  Pilot raw FID:       4.170823226548009
+  Raw FID difference vs initializer: +0.10326048330819049 (higher/worse).
+  Step=200; checkpoint present; prox observed; all 3 FID evaluations present.
+  Final epsilon=0.10; lambda_prox=0.02.
+  Generator proposal control ESS early/late active medians:
+    0.0218200691920613 -> 0.006483111599390159
+  Equivalent late-median effective draws for K=16: 1.0972466739908524 / 16.
+  Final logged generator proposal control ESS: 0.007069837443101337
+  Relative prox residual early/late: 1.0016343593597412 -> 0.9981088638305664
+  Alignment loss early/late: 1.7640314102172852 -> 1.5656158924102783
+  Refined control ESS final batch=0.2061249510489793; EMA=0.31055990385803633.
+  Health label=healthy (refined ESS EMA, not generator tracking).
+  Median logged step time after40: 8.502595806121827 seconds.
+  W&B: https://wandb.ai/20221006010-north-western-university/ptflow-active-diagnostic/runs/1f19ff7edf8e4c6e
+
+16199241 cosine epsilon directory:
+/scratch/mdraihk/ptflow/active_pt/B_epscos200_20260923_225254_llaZCS
+  Initializer EMA FID: 4.067562743239819
+  Pilot EMA FID:       4.068836833144758
+  Pilot raw FID:       4.17452055029662
+  Raw FID difference vs initializer: +0.10695780705680136 (higher/worse).
+  Step=200; checkpoint present; prox observed; all 3 FID evaluations present.
+  Final epsilon=0.05; lambda_prox=0.02.
+  Generator proposal control ESS early/late active medians:
+    0.0209539548304016 -> 0.0019527235820143707
+  Equivalent late-median effective draws for K=16: 1.0292908537302154 / 16.
+  Final logged generator proposal control ESS: 0.0019527235820143707
+  Relative prox residual early/late: 1.00144624710083 -> 0.9963101148605347
+  Alignment loss early/late: 1.7625997066497803 -> 1.5606882572174072
+  Refined control ESS final batch=0.2302067322475499; EMA=0.30614084149128645.
+  Health label=healthy (refined ESS EMA, not generator tracking).
+  Median logged step time after40: 8.519724702835083 seconds.
+  W&B: https://wandb.ai/20221006010-north-western-university/ptflow-active-diagnostic/runs/8fdc91be098dd385
+
+Result interpretation / next decision:
+  Scheduling and nonzero prox execution verified; no FID improvement in either
+  pilot's measurements. Cosine cooling did not resolve generator proposal collapse.
+  Refined-proposal health must not be treated as generator/prox convergence.
+  Relative prox residual is ||grad_phi(m)+m-x0|| / ||m-x0|| and remains near 1.
+  Control ESS maps to effective draws as 1+(K-1)*control_ESS.
+  With generator EMA decay 0.999, initial weights still contribute 0.999^200
+  = 0.8186488294786356 of the EMA linear expansion after 200 updates.
+  Single training/evaluation seed, 200 steps; no statistically established winner.
+  No matched continued-training lambda_prox=0 control yet reported for these pilots;
+  cannot attribute their raw FID increase exclusively to the PT term.
+  Recommendation: no automatic 30K promotion; use matched no-prox control and
+  investigate potential/generator calibration before further epsilon sweeps.
+  No additional job submitted or existing job modified by this analysis.
+
+======================================================================
+USER-REQUESTED FULL RUN: B_PT_Full
+======================================================================
+Prepared 2026-09-24. User confirmed submission: job 16208743.
+Earlier user-pasted queue snapshot: RUNNING, elapsed 00:02:32, nodeai09, work1.
+Latest log: training FAILED intentionally at step 368 due to estimator-health
+watchdog; the final Slurm accounting row has not yet been provided.
+Full job name B_PT_Full (display truncated to B_PT_Ful in the queue).
+Startup is now confirmed by log: WEIGHTS_ONLY_INIT source_step=200000 new_step=0
+optimizer_states=0. W-Flow B 200K EMA generator weights initialized a fresh run.
+User explicitly requested 30K iterations, save every1K, H200x2, active PT and
+epsilon annealing after reviewing both 200-step pilot results.
+Launcher: /scratch/mdraihk/ptflow/submit_B_PT_Full.py
+Command: source ~/ptflow_env.sh && python /scratch/$USER/ptflow/submit_B_PT_Full.py submit
+Derives configuration from pilot job16199241; creates a separate private code copy.
+Starts fresh at0 using W-Flow B200K EMA generator weights only.
+Global generated batch1024, accumulation4, K16, generatorLR5e-6, potentialLR2e-5.
+Cosine epsilon0.10->0.05; warmup20; anneal20000.
+Full prox: warmup20/ramp80/max0.02; potential+scale updates each iteration.
+Alignment calibration0.1 through1K, fades to0 by5K; optional curvature remains off.
+72h allocations with checkpoint handoff before wall time and same-job requeue.
+No existing job cancelled. Experimental quality; no pilot FID improvement established.
+Slurm and W&B training name: B_PT_Full; project: ptflow-active-diagnostic.
+Exact home pointer: /scratch/mdraihk/ptflow/active_pt/latest_B_PT_Full.txt
+Generated home pattern: /scratch/mdraihk/ptflow/active_pt/B_PT_Full_<stamp>_<suffix>/job
+Training output: <home>/B_PT_Full
+Checkpoints: <home>/B_PT_Full/checkpoints/state_XXXXXXXX.pt (all1K intervals retained)
+Job ID: <home>/job_id.txt
+Logs: <home>/logs/B_PT_Full_<jobid>.out and .err
+Reports: <home>/report/fid.csv and summary.json
+Final evaluations: initializer EMA, final EMA, final raw; FID-50K/CFG1.2/seed42/ModeA.
+Full recipe and commands: B_PT_Full_GUIDE.txt in the local workspace.
+
+User-reported progress update: B_PT_Full reached approximately 200 iterations.
+  potential_updated=1; scale_updated=1; active_policy=1.
+  alpha_def/sched_alpha_def=0.5; potential LR approximately2e-5;
+  alignment_weight approximately0.1; prox_disp_scale=1; clip_frac=0.
+  health=2; consecutive_bad=0; refine_accept=1;
+  refine_started_from_generator=0.
+  User reports other curves converging; numerical trends not supplied yet.
+Interpretation: update flags and fixed settings are expected. The zero generator
+start fraction means refinement chose x0 (including energy ties) over generator
+outputs in reported samples; it is not proof of useful generator/potential matching.
+The health flag monitors refined-estimator EMA, not unrefined generator proposal ESS.
+Do not treat acceptance1 or clipping0 (clipping disabled) as quality certificates.
+Recommended review at the first1K checkpoint with generator-proposal ESS,
+relative prox residual and matched-protocol raw/EMA FID. Full30K quality is not
+established by this200-step snapshot. No job or configuration changed.
+
+Full-run failure log received (2026-09-24, logged stop at 14:12:34):
+  Job: 16208743, B_PT_Full. Training reached step 368, not 30K.
+  Exact home:
+  /scratch/mdraihk/ptflow/active_pt/B_PT_Full_20260924_030649_u9mui_x5/job
+  Training workdir: <home>/B_PT_Full
+  Checkpoint reported saved by watchdog:
+  <home>/B_PT_Full/checkpoints/state_00000368.pt
+  Failure file written by watchdog: <home>/B_PT_Full/PT_FAILED.txt
+  RuntimeError: Active PT estimator remained broken for 50 iterations;
+  control ESS EMA=0.023157. Checkpoint saved; refusing a silent 30k failure.
+  Training elapsed approximately52m35s; displayed rate approximately8.60s/step.
+
+Progress from PT_STATUS rows:
+  step200: health=healthy; EMA=0.3106632934808225; prox_rel=0.9980851411819458
+  step220: health=degrading; EMA=0.2315306882049102; prox_rel=0.9985612630844116
+  step320: health=broken; EMA=0.04928507826964874; consecutive_bad=2
+  step360: health=broken; EMA=0.026348615068913162; consecutive_bad=42
+  step368: health=broken; EMA=0.02315695003696049; consecutive_bad=50
+  Final epsilon=0.09996265778212363; lambda_prox=0.02 (still active).
+  Final refined normalized ESS=0.06975211891470964, or1.1160339026353542 draws/16.
+  Last generator diagnostic at360: control_ESS=9.333206460645135e-7,
+  or approximately1.000014 effective draws/16. Value at368 is null because the
+  generator diagnostic is sampled every20 steps, not because a computation NaN'd.
+  Final relative prox residual=1.0085139274597168;
+  final refined residual RMS=0.13163426518440247;
+  final alignment loss=1.8616605997085571.
+  Epsilon fell only0.0373422% from0.1: its schedule is running as configured.
+  Not a CUDA OOM, Slurm allocation, or epsilon-progress freeze in this trace.
+
+Decision after new evidence:
+  Do not restart the identical30K recipe or disable the failure guard to force
+  completion. PT updates were active but importance weights collapsed and
+  generator/potential matching did not improve materially.
+  The unique numerical/modeling cause is not established by these metrics alone.
+  Preserve checkpoint368 for fixed-checkpoint proposal/scale/refinement diagnosis,
+  then validate any repair with a bounded run beyond the observed failure point.
+  No new job submitted; no running core files changed.
+
+2026-09-24: checkpoint 368 preservation confirmed by user
+  User ls output confirms state_00000368.pt exists (2.7G).
+  PT_FAILED.txt confirms step368, broken for50 iterations, EMA=0.023157.
+  Prepared audit_B_PT_368.py, job name B_PT_audit368, one H200, two-hour limit.
+  Status: launcher delivered; NOT submitted by this assistant; job ID unknown.
+  Inputs: exact B_PT_Full home/checkpoint recorded above; raw weights only.
+  72 fixed-weight cases: refinement0/8/32/64, learned/identity covariance,
+  alpha0.10/0.50/0.75, K16/64/128; 32 input pairs, three proposal repeats.
+  Epsilon fixed; no training, schedule advance, cancellation, or core edits.
+  Output root: /scratch/mdraihk/ptflow/diagnostics/B_PT_audit368_<timestamp>_<suffix>
+  Latest pointer: /scratch/mdraihk/ptflow/diagnostics/latest_B_PT_audit368.txt
+  Reports: diagnostics.csv, per_sample.csv, summary.json, manifest.json.
+  Job ID saved in output/job_id.txt; logs/audit_<jobid>.out and .err.
+  Local verification: four tests passed; no remote GPU result available yet.
+
+2026-09-24: audit368 completed, results supplied by user
+  Output: /scratch/mdraihk/ptflow/diagnostics/B_PT_audit368_20260924_052810_uy8p11zx
+  Job ID not supplied. Completed=true; 72 cases; 6912 per-sample rows;
+  audit compute elapsed239.579347 seconds. Checkpoint, parameters, schedule unchanged.
+  Baseline(refine8, learned covariance, alpha0.75, K16):
+    effective draws mean1.07689677/16; control ESS mean0.00512645;
+    max normalized weight mean0.96799667; near-one-draw fraction0.86458333.
+  Best by mean control ESS(refine8, learned, alpha0.10, K16):
+    effective draws mean1.17686687/16; control ESS mean0.01179112;
+    max weight mean0.92890928; near-one-draw fraction0.69791667.
+  Refine64, learned, alpha0.10, K16:
+    effective draws mean1.15721324/16; control ESS mean0.01048088.
+    Residual RMS mean0.00333415 versus0.12024183 at refine8 (~36-fold lower).
+  All 72 all-cohort mean control ESS values below0.05, inferred from sorted
+  top rows (max0.01179112). This is a small fixed-weight screen, not controller
+  EMA replay or a proof about all inputs. K64/128 cannot restore the configured
+  health criterion on this screen; their absolute ESS requires the full CSV.
+  Interpretation: additional mean refinement alone did not recover proposal
+  weights. Covariance/target shape mismatch or other estimator/model issues
+  remain candidates; the unique cause is not established. Do not restart the
+  identical30K recipe, bypass the guard, or claim a fix from these results.
+  Next candidate: freeze generator/potential and test proposal-scale calibration
+  on separate fitting/probe inputs, then a bounded training pilot beyond368.
+  No further job submitted; no core changes.
+
+2026-09-24: prepared scale-only calibration after failed audit recovery
+  Launcher: calibrate_B_PT_368.py; guide: B_PT_SCALE_368_GUIDE.txt.
+  Job name: B_PT_scale368; one H200; work1; two-hour limit; 64G host RAM.
+  Status: ready for user submission; no job ID and no GPU result yet.
+  Same raw step368 checkpoint; generator, potential, and epsilon frozen.
+  128 fitting pairs; 64 separate evaluation pairs; 64 mean-refinement steps.
+  Scale-only AdamW: 500 steps, LR0.0003, batch4, K8 antithetic, no weight decay.
+  Before/after ESS: K16/64/128, alpha0.10/0.75, variance multipliers0.25/0.5/1/2.
+  Fixed endpoint and primary unit multiplier; no held-out selection/early stopping.
+  Output pointer: /scratch/mdraihk/ptflow/diagnostics/latest_B_PT_scale368.txt
+  Output: diagnostics.csv, summary.json, fit_trace.csv, per_sample.csv,
+  inputs.pt, manifest.json, scale_candidate.pt, job_id.txt, logs/scale_<jobid>.*.
+  Candidate scale is a separate artifact, not a resumable PT-Flow checkpoint.
+  No automatic full-training restart or core edits.
+  Four local tests passed (18.99s), including known-quadratic covariance recovery,
+  real tiny-model end-to-end isolation, fixed comparison decision, Bash syntax.
+
+2026-09-24: scale calibration submitted; user-supplied queue observation
+  Job ID: 16212008. Queue name truncated as B_PT_sca, matching B_PT_scale368.
+  Partition: work1. State: R. Elapsed at observation: 00:00:10. Node: node0107.
+  Expected task: checkpoint368 scale-only calibration, 500 scale updates.
+  Results pending; no completion or ESS recovery claim.
+
+2026-09-24: scale calibration 16212008 finished its diagnostic successfully
+  User supplied final completed=true JSON and report path (Slurm terminal
+  accounting state not separately supplied).
+  Output: /scratch/mdraihk/ptflow/diagnostics/B_PT_scale368_20260924_065542_2qpgle9v
+  Total diagnostic elapsed430.265s; scale500-update fitting loop30.125s.
+  Generator/potential/source checkpoint/schedule unchanged; scale_updated=true.
+  Fitting128 pairs (13 null); held-out64 pairs (6 null), three repeats.
+  Unit variance multiplier, alpha0.10, refine64:
+    K16 effective draws: before1.16354644 -> after1.19043426;
+      control ESS0.01090310 -> 0.01269562; after max weight0.92247270.
+    K64 effective draws: before1.17117067 -> after1.26195656;
+      control ESS0.00271699 -> 0.00415804.
+    K128 effective draws: before1.21000734 -> after1.32863360;
+      control ESS0.00165360 -> 0.00258767; after max weight0.88556522.
+  Both conditional and null cohorts failed the prespecified primary screen.
+  scale_bound_fraction=0.0 for reported cases; no observed near-bound saturation.
+  Exploratory best after fit: variance multiplier0.25, alpha0.10, K16;
+    effective draws1.50024282; control ESS0.03334952; max weight0.79377453;
+    near-one-draw fraction0.19791667. Still below broken threshold0.05.
+  candidate_for_extended_pilot=false. No demonstrated covariance-only repair.
+  Preserve scale_candidate.pt as diagnostic evidence; do not transplant it
+  into a30K resume based on these results. Finite fitting budget does not
+  prove all diagonal proposals impossible. Exact cause remains unestablished.
+  No new job submitted and no core changes made.

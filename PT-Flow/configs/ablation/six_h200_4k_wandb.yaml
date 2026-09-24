@@ -1,0 +1,114 @@
+# One command submits six serial Slurm jobs, using one H200 at a time:
+# python scripts/run_six_ablation.py submit configs/ablation/six_h200_4k_wandb.yaml
+# Preview: replace submit with plan. This manifest is NOT input to train.py.
+version: 1
+
+# Paths are relative to the PT-Flow repository, not this YAML directory.
+# Default: fresh CIFAR-10 training with a compact model and ConvNeXt features.
+# To fine-tune: change base_config to the saved run's config.json AND supply
+# its state_*.pt below. Each arm starts from the SAME generator EMA; its
+# optimizer, potential, scale network and schedule start fresh.
+base_config: configs/gen/ptflow_cifar10_t4.yaml
+init_ema_checkpoint: ""
+output_dir: ../runs/ablation_six_h200_4k_wandb
+steps: 4000                     # PER training configuration: 11 x 4000 = 44k.
+seed: 42
+
+environment:
+  PTFLOW_ASSETS: ../assets
+  PTFLOW_DATA: ../data
+  CIFAR10_PATH: ${PTFLOW_DATA}/cifar10
+  CIFAR10_FID_NPZ: ${PTFLOW_ASSETS}/fid_stats/cifar10_train_fid_stats.npz
+  TORCH_HUB_DIR: ${PTFLOW_ASSETS}/torch_hub
+
+slurm:
+  partition: work1
+  account: ""                  # Empty uses your default Palmetto account.
+  gpu: h200
+  cpus: 8
+  memory: 96G
+  time: "24:00:00"             # PER job; adjust to your account's time limit.
+
+reference:
+  proposal: defensive_diagonal
+  eps: 0.10
+  K: 8
+  lambda_prox_max: 0.10
+  n: 0
+  cfg_scale: 1.2
+
+# Six jobs, one factor at a time. Reference training/evaluation is reused.
+sweeps:
+  proposal: [naive, recentered, diagonal, defensive_diagonal]
+  eps: [0.02, 0.05, 0.10, 0.20]
+  K: [4, 8, 16]
+  lambda_prox_max: [0.0, 0.1, 0.2]
+  n: [0, 1, 2, 4]
+  cfg_scale: [1.0, 1.2, 1.5, 2.0]
+
+evaluation:
+  num_samples: 10000            # Screening FID. Final comparisons need 50k.
+  batch_size: 64
+  seed: 1234                    # Identical for all comparisons.
+  gamma: 0.5                    # Fixed in n sweep; retain Mode B backtracking.
+
+wandb:
+  enabled: true
+  project: ptflow-ablation
+  entity: null                  # Your W&B team, or null for the login default.
+  group: null                   # Null groups by the output directory name.
+  mode: online                  # Use offline only if compute nodes lack internet.
+  # Authenticate with `wandb login` on Palmetto. Never put an API key here.
+
+# Identical settings across arms; preserve the base architecture and features.
+overrides:
+  logging:
+    use_wandb: true              # The wandb section above controls this in generated configs.
+    log_every_k: 20
+  dataset:
+    kwargs:
+      num_workers: 4
+  model:
+    precision: auto
+    use_bf16: true
+  optimizer:
+    fused: auto
+    lr_schedule:
+      warmup_steps: 200
+      lr_schedule: const
+      # learning_rate: 0.00005  # Consider when initializing from a checkpoint.
+  train:
+    ema_decay: 0.999
+    extra_ema_decays: []
+    compile_generator: false
+    feature_cache_gib: 2.0
+    feature_chunk_size: 64
+    profile_every: 100
+    push_at_resume: 20
+    grad_accum_steps: 4
+    ot_kwargs:
+      reuse_costs: true
+  pt:
+    enabled: true
+    scale_K: 4                   # Fixed; separate from the pt.K sweep.
+    prox_mode: detach
+    logw_clip: 0.0
+    curv_probe: false
+    optimizer:
+      fused: auto
+      lr_schedule:
+        warmup_steps: 200
+        lr_schedule: const
+    schedule:
+      prox_warmup: 500
+      prox_ramp: 1000
+      theta_period: 1
+      theta_period_degraded: 2
+      lambda_curv: 0.0
+
+# Proposal mapping: scale_mode, alpha (start=end=degraded).
+# naive: none,1.0; recentered: none,0.0; diagonal: learned,0.0;
+# defensive_diagonal: learned,0.05.
+# Epsilon is fixed per arm: eps_min=eps_max. Health gating remains enabled.
+# lambda=0 still trains the potential; this is not a PT-off cost baseline.
+# Retry unchanged settings after interruption: add --resume to submit.

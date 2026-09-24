@@ -1,0 +1,872 @@
+#!/usr/bin/env bash
+# PT-Flow Palmetto 2 screening-ablation submitter.
+#
+# This file is plain text and executable with Bash. It DOES NOT edit PT-Flow.
+# It clones https://github.com/kraihan/PT-Flow.git and writes generated configs,
+# worker scripts, logs, checkpoints, metrics, plots, and reports under /scratch.
+#
+# QUICK START ON A PALMETTO LOGIN NODE
+# ------------------------------------
+# 1. Copy this text file to the login node.
+# 2. Submit the CIFAR-10 screening suite:
+#
+#    ABL_TAG=cifar10_ptflow_screen \
+#    bash PT_FLOW_PALMETTO_ABLATION_RUNBOOK.txt submit
+#
+# 3. If ImageNet is already arranged as ImageFolder data, build its latent cache
+#    in parallel with the CIFAR ablations:
+#
+#    ABL_TAG=cifar10_ptflow_screen \
+#    BUILD_IMAGENET_LATENTS=1 \
+#    IMAGENET_PATH=/path/to/imagenet \
+#    bash PT_FLOW_PALMETTO_ABLATION_RUNBOOK.txt submit
+#
+#    IMAGENET_PATH must contain train/<wnid>/*.JPEG and val/<wnid>/*.JPEG.
+#    ImageNet is gated/licensed, so this file cannot download it automatically.
+#    CIFAR-10 is pixel-space and does not use a latent cache.
+#
+# 4. Check status:
+#
+#    ABL_TAG=cifar10_ptflow_screen \
+#    bash PT_FLOW_PALMETTO_ABLATION_RUNBOOK.txt status
+#
+# 5. Final report location:
+#
+#    /scratch/$USER/ptflow_ablation/runs/$ABL_TAG/report/REPORT.md
+#
+# OPTIONAL SITE SETTINGS
+# ----------------------
+# PALMETTO_ACCOUNT=<allocation>      omitted by default
+# PALMETTO_PARTITION=work1           default work1
+# GPU_TYPE=a100                      default a100
+# NPROC=2                            GPUs per train/FID job
+# MAX_TRAIN_JOBS=2                   concurrent training-array tasks
+# MAX_EVAL_JOBS=4                    concurrent inference-array tasks
+# ABL_STEPS=5000                     screening training budget
+# ABL_FID_SAMPLES=10000              screening FID sample count
+# ABL_SEED=42                        training/evaluation seed
+# REPO_REF=main                      branch, tag, or commit to clone
+# PTFLOW_ABL_WORK=/scratch/$USER/ptflow_ablation
+#
+# SCIENTIFIC SCOPE
+# ----------------
+# This is a screening suite for choosing promising settings. A 5k-step run and
+# 10k-sample FID are not final ICLR evidence. Re-run selected settings with the
+# full budget, 50k-sample FID, and at least three seeds. Report uncertainty,
+# wall-clock/GPU cost, peak memory, NFE, the matched PT-off control, and failure
+# cases. The M3 checkpoint measurement below is explicitly a directional finite-
+# difference proxy for ||nabla^3 F_x(y*)||, not the full tensor operator norm.
+
+set -Eeuo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  bash PT_FLOW_PALMETTO_ABLATION_RUNBOOK.txt submit
+  ABL_TAG=<existing-tag> bash PT_FLOW_PALMETTO_ABLATION_RUNBOOK.txt status
+
+Run this file on a Clemson Palmetto 2 login node. It submits compute jobs; it
+does not install packages or run experiments on the login node.
+EOF
+}
+
+ACTION="${1:-}"
+case "$ACTION" in
+  submit|status) ;;
+  -h|--help|help|"") usage; exit 0 ;;
+  *) echo "Unknown action: $ACTION" >&2; usage >&2; exit 2 ;;
+esac
+
+command -v sbatch >/dev/null 2>&1 || {
+  echo "ERROR: sbatch is unavailable. Run this on a Palmetto login node." >&2
+  exit 1
+}
+
+REPO_URL="${REPO_URL:-https://github.com/kraihan/PT-Flow.git}"
+REPO_REF="${REPO_REF:-main}"
+WORK="${PTFLOW_ABL_WORK:-/scratch/${USER:?USER is unset}/ptflow_ablation}"
+LATEST_TAG_FILE="$WORK/latest_tag"
+
+if [[ -n "${ABL_TAG:-}" ]]; then
+  TAG="$ABL_TAG"
+elif [[ "$ACTION" == status && -s "$LATEST_TAG_FILE" ]]; then
+  TAG="$(<"$LATEST_TAG_FILE")"
+else
+  TAG="cifar10_screen_$(date +%Y%m%d_%H%M%S)"
+fi
+[[ "$TAG" =~ ^[A-Za-z0-9._-]+$ ]] || {
+  echo "ERROR: ABL_TAG may contain only letters, digits, dot, underscore, and dash." >&2
+  exit 2
+}
+
+RUN_ROOT="$WORK/runs/$TAG"
+CONTROL="$RUN_ROOT/control"
+LOGS="$RUN_ROOT/logs"
+SETTINGS="$CONTROL/settings.env"
+SUBMISSION="$CONTROL/submission.env"
+
+if [[ "$ACTION" == status ]]; then
+  [[ -s "$SUBMISSION" ]] || { echo "No submission record for tag $TAG" >&2; exit 1; }
+  # shellcheck disable=SC1090
+  source "$SUBMISSION"
+  IDS="$SETUP_JOB,$BASE_JOB,$TRAIN_JOB,$INFER_JOB,$LIKELIHOOD_JOB,$PROPOSAL_JOB,$M3_JOB,$REPORT_JOB"
+  [[ "${LATENT_JOB:-none}" != none ]] && IDS="$IDS,$LATENT_JOB"
+  squeue -j "$IDS" -o '%.18i %.30j %.10T %.12M %.5D %R'
+  echo "Report (after completion): $RUN_ROOT/report/REPORT.md"
+  exit 0
+fi
+
+[[ ! -e "$SUBMISSION" ]] || {
+  echo "ERROR: tag $TAG was already submitted. Choose a new ABL_TAG." >&2
+  exit 1
+}
+
+STEPS="${ABL_STEPS:-5000}"
+FID_SAMPLES="${ABL_FID_SAMPLES:-10000}"
+SEED="${ABL_SEED:-42}"
+NPROC="${NPROC:-2}"
+GEN_BSZ="${GEN_BSZ:-64}"
+MAX_TRAIN_JOBS="${MAX_TRAIN_JOBS:-2}"
+MAX_EVAL_JOBS="${MAX_EVAL_JOBS:-4}"
+GPU_TYPE="${GPU_TYPE:-a100}"
+PARTITION="${PALMETTO_PARTITION:-work1}"
+ACCOUNT="${PALMETTO_ACCOUNT:-}"
+BUILD_IMAGENET_LATENTS="${BUILD_IMAGENET_LATENTS:-0}"
+IMAGENET_PATH="${IMAGENET_PATH:-}"
+ANACONDA_MODULE="${ANACONDA_MODULE:-anaconda3/2023.09-0}"
+TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu121}"
+
+for value in "$STEPS" "$FID_SAMPLES" "$SEED" "$NPROC" "$GEN_BSZ" \
+             "$MAX_TRAIN_JOBS" "$MAX_EVAL_JOBS" "$BUILD_IMAGENET_LATENTS"; do
+  [[ "$value" =~ ^[0-9]+$ ]] || { echo "ERROR: expected integer, got $value" >&2; exit 2; }
+done
+(( STEPS > 0 && FID_SAMPLES > 0 && NPROC > 0 && MAX_TRAIN_JOBS > 0 && MAX_EVAL_JOBS > 0 )) || {
+  echo "ERROR: step, sample, process, and concurrency values must be positive." >&2
+  exit 2
+}
+if [[ "$BUILD_IMAGENET_LATENTS" == 1 && -z "$IMAGENET_PATH" ]]; then
+  echo "ERROR: BUILD_IMAGENET_LATENTS=1 requires IMAGENET_PATH." >&2
+  exit 2
+fi
+
+mkdir -p "$CONTROL" "$LOGS" "$RUN_ROOT/results" "$RUN_ROOT/report"
+printf '%s\n' "$TAG" > "$LATEST_TAG_FILE"
+
+write_setting() { printf 'export %s=%q\n' "$1" "$2" >> "$SETTINGS"; }
+: > "$SETTINGS"
+write_setting REPO_URL "$REPO_URL"
+write_setting REPO_REF "$REPO_REF"
+write_setting WORK "$WORK"
+write_setting TAG "$TAG"
+write_setting RUN_ROOT "$RUN_ROOT"
+write_setting CONTROL "$CONTROL"
+write_setting LOGS "$LOGS"
+write_setting CODE "$RUN_ROOT/PT-Flow"
+write_setting ENV_PREFIX "$WORK/conda/ptflow"
+write_setting STEPS "$STEPS"
+write_setting FID_SAMPLES "$FID_SAMPLES"
+write_setting SEED "$SEED"
+write_setting NPROC "$NPROC"
+write_setting GEN_BSZ "$GEN_BSZ"
+write_setting ANACONDA_MODULE "$ANACONDA_MODULE"
+write_setting TORCH_INDEX_URL "$TORCH_INDEX_URL"
+write_setting PTFLOW_ASSETS "$WORK/assets"
+write_setting PTFLOW_DATA "$WORK/data"
+write_setting CIFAR10_PATH "$WORK/data/cifar10"
+write_setting CIFAR10_FID_NPZ "$WORK/assets/fid_stats/cifar10_train_fid_stats.npz"
+write_setting TORCH_HUB_DIR "$WORK/assets/torch_hub"
+write_setting HF_HOME "$WORK/hf_cache"
+write_setting IMAGENET_PATH "$IMAGENET_PATH"
+write_setting IMAGENET_CACHE_PATH "$WORK/data/imagenet_latents"
+write_setting IMAGENET_FID_NPZ "$WORK/assets/fid_stats/jit_in256_stats.npz"
+write_setting BUILD_IMAGENET_LATENTS "$BUILD_IMAGENET_LATENTS"
+write_setting PYTHONUNBUFFERED "1"
+write_setting TOKENIZERS_PARALLELISM "false"
+write_setting OMP_NUM_THREADS "4"
+write_setting DRIFT_COMPILE "0"
+
+export ABL_TAG="$TAG"
+export PTFLOW_ABL_WORK="$WORK"
+export SETTINGS_FILE="$SETTINGS"
+
+cat > "$CONTROL/job_env.sh" <<'JOBENV'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+: "${SETTINGS_FILE:?SETTINGS_FILE is required}"
+# shellcheck disable=SC1090
+source "$SETTINGS_FILE"
+module purge
+module load "$ANACONDA_MODULE"
+eval "$(conda shell.bash hook)"
+conda activate "$ENV_PREFIX"
+export PTFLOW_ASSETS PTFLOW_DATA CIFAR10_PATH CIFAR10_FID_NPZ TORCH_HUB_DIR
+export HF_HOME IMAGENET_PATH IMAGENET_CACHE_PATH IMAGENET_FID_NPZ
+export PYTHONUNBUFFERED TOKENIZERS_PARALLELISM OMP_NUM_THREADS DRIFT_COMPILE
+mkdir -p "$RUN_ROOT/results" "$RUN_ROOT/report" "$HF_HOME" "$TORCH_HUB_DIR"
+cd "$CODE"
+echo "host=$(hostname) job=${SLURM_JOB_ID:-none} tag=$TAG code=$CODE"
+python - <<'PY'
+import torch
+print("torch", torch.__version__, "cuda", torch.version.cuda,
+      "gpu_count", torch.cuda.device_count(),
+      [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())])
+PY
+JOBENV
+
+cat > "$CONTROL/make_configs.py" <<'PYCONFIG'
+from __future__ import annotations
+import argparse, copy, json, sys
+from pathlib import Path
+import yaml
+
+p = argparse.ArgumentParser()
+p.add_argument("--code", type=Path, required=True)
+p.add_argument("--run-root", type=Path, required=True)
+p.add_argument("--steps", type=int, required=True)
+p.add_argument("--seed", type=int, required=True)
+p.add_argument("--world-size", type=int, required=True)
+a = p.parse_args()
+sys.path.insert(0, str(a.code.resolve()))
+from scripts.make_run_config import make_config
+
+root = a.run_root.resolve()
+cfgdir, results, control = root / "configs", root / "results", root / "control"
+for d in (cfgdir, results, control): d.mkdir(parents=True, exist_ok=True)
+
+base = make_config("cifar10_t4")
+steps = a.steps
+save_every = max(100, min(1000, steps // 5))
+base["logging"].update(use_wandb=False, log_every_k=20)
+base["dataset"]["kwargs"]["num_workers"] = 4
+base["train"].update(
+    seed=a.seed, total_steps=steps, save_per_step=save_every,
+    keep_every=max(save_every, steps // 2), keep_last=2,
+    eval_per_step=0, eval_at_start=False, eval_samples=0,
+)
+base["optimizer"]["lr_schedule"].update(
+    total_steps=steps, warmup_steps=min(500, max(50, steps // 10)))
+base["pt"]["optimizer"]["lr_schedule"].update(
+    total_steps=steps, warmup_steps=min(500, max(50, steps // 10)))
+base["pt"]["schedule"].update(
+    eps_max=0.2, eps_min=0.005,
+    eps_warmup=max(1, int(0.04 * steps)),
+    eps_anneal_steps=max(1, int(0.60 * steps)),
+    prox_warmup=max(1, int(0.10 * steps)),
+    prox_ramp=max(1, int(0.30 * steps)),
+    lambda_prox_max=0.1,
+)
+for key in ("batch_size", "eval_batch_size"):
+    assert base["dataset"][key] % a.world_size == 0, key
+assert base["train"]["train_batch_size"] % a.world_size == 0
+
+def dump(name, cfg):
+    path = cfgdir / f"{name}.yaml"
+    path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    return path
+
+base_path = dump("base", base)
+variants = []
+
+def add(name, mutate):
+    cfg = copy.deepcopy(base)
+    mutate(cfg)
+    variants.append((name, cfg))
+
+add("pt_off", lambda c: c["pt"].update(enabled=False))
+
+def proposal(c, family):
+    s = c["pt"]["schedule"]
+    if family == "naive":
+        c["pt"]["scale_mode"] = "none"
+        s.update(alpha_def_start=1.0, alpha_def_end=1.0, alpha_def_degraded=1.0)
+    elif family == "recentered":
+        c["pt"]["scale_mode"] = "none"
+        s.update(alpha_def_start=0.0, alpha_def_end=0.0, alpha_def_degraded=0.0)
+    elif family == "diag_pure":
+        c["pt"]["scale_mode"] = "learned"
+        s.update(alpha_def_start=0.0, alpha_def_end=0.0, alpha_def_degraded=0.0)
+
+for family in ("naive", "recentered", "diag_pure"):
+    add(f"proposal_{family}", lambda c, f=family: proposal(c, f))
+
+for value in (0.0, 0.05, 0.2, 0.5):
+    add(f"lambda_{value:g}",
+        lambda c, v=value: c["pt"]["schedule"].update(lambda_prox_max=v))
+
+for value in (0.2, 0.1, 0.05, 0.02, 0.01):
+    add(f"eps_{value:g}",
+        lambda c, v=value: c["pt"]["schedule"].update(eps_min=v))
+
+for value in (4, 16, 32):
+    add(f"train_K_{value}", lambda c, v=value: c["pt"].update(K=v))
+
+assert len(variants) == 16, len(variants)
+train_rows = []
+for run_id, cfg in variants:
+    path = dump(run_id, cfg)
+    run_dir = root / "train" / run_id
+    result = results / f"train__{run_id}.json"
+    train_rows.append((run_id, path, run_dir, result))
+(control / "train_variants.tsv").write_text(
+    "".join("\t".join(map(str, x)) + "\n" for x in train_rows), encoding="utf-8")
+
+infer_rows = []
+def infer(run_id, sampler, cfg, n=0, gamma=0.0, k=0):
+    infer_rows.append((run_id, sampler, cfg, n, gamma, k,
+                       results / f"infer__{run_id}.json", root / "infer" / run_id))
+
+infer("modeB_n0_g0.5", "B", 1.2, n=0, gamma=0.5)
+for n in (1, 2, 4, 8):
+    for gamma in (0.25, 0.5, 0.75):
+        infer(f"modeB_n{n}_g{gamma:g}", "B", 1.2, n=n, gamma=gamma)
+for k in (8, 16, 32, 64):
+    infer(f"modeC_K{k}", "C", 1.2, k=k)
+for cfg in (1.0, 1.1, 1.2, 1.5, 2.0):
+    infer(f"cfg_{cfg:g}", "A", cfg)
+assert len(infer_rows) == 22, len(infer_rows)
+(control / "inference_variants.tsv").write_text(
+    "".join("\t".join(map(str, x)) + "\n" for x in infer_rows), encoding="utf-8")
+
+metadata = {
+    "steps": steps, "seed": a.seed, "world_size": a.world_size,
+    "base_config": str(base_path), "training_variants": len(variants),
+    "inference_variants": len(infer_rows),
+    "warning": "screening settings; not final-paper FID",
+}
+(control / "design.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+print(json.dumps(metadata, indent=2))
+PYCONFIG
+
+cat > "$CONTROL/proposal_diagnostic.py" <<'PYPROPOSAL'
+"""Synthetic proposal-family x epsilon x dimension diagnostic.
+
+The analytic potential is smooth and strongly convex. M3 is the exact spectral
+norm of its diagonal third-derivative tensor at the prox point. The experiment
+reports normalized ESS/K and log-weight spread for naive, recentered-isotropic,
+and diagonal-Laplace proposals. This tests the scaling mechanism; it is not an
+image-quality experiment.
+"""
+from __future__ import annotations
+import argparse, csv, json, math
+from pathlib import Path
+import torch
+
+p = argparse.ArgumentParser()
+p.add_argument("--out", type=Path, required=True)
+p.add_argument("--k", type=int, default=512)
+p.add_argument("--repeats", type=int, default=4)
+a = p.parse_args()
+a.out.mkdir(parents=True, exist_ok=True)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+dims = (32, 128, 512, 2048, 3072, 4096)
+eps_values = (0.2, 0.1, 0.05, 0.02, 0.01, 0.005)
+families = ("naive", "recentered", "diag_laplace")
+kappa, beta, x_value = 0.25, 0.15, 2.0
+
+def prox_scalar():
+    y = torch.tensor(x_value, dtype=torch.float64)
+    for _ in range(30):
+        f = (1 + kappa) * y + beta * torch.sin(y) - x_value
+        y = y - f / ((1 + kappa) + beta * torch.cos(y))
+    return float(y)
+
+m_scalar = prox_scalar()
+h_scalar = (1 + kappa) + beta * math.cos(m_scalar)
+m3_exact = abs(beta * math.sin(m_scalar))
+rows = []
+for d in dims:
+    # Float64 is deliberate: the proposal log-density and target exponent can
+    # each be large at d=4096 and small epsilon even when their difference is O(1).
+    x = torch.full((d,), x_value, device=device, dtype=torch.float64)
+    m = torch.full((d,), m_scalar, device=device, dtype=torch.float64)
+    for eps in eps_values:
+        for family in families:
+            ess_values, spread_values = [], []
+            for repeat in range(a.repeats):
+                gen = torch.Generator(device=device).manual_seed(1000 + d + repeat)
+                half = (a.k + 1) // 2
+                z0 = torch.randn((half, d), generator=gen, device=device, dtype=torch.float64)
+                z = torch.cat((z0, -z0), dim=0)[:a.k]
+                if family == "naive":
+                    center, scale = x, math.sqrt(2 * eps)
+                elif family == "recentered":
+                    center, scale = m, math.sqrt(2 * eps)
+                else:
+                    center, scale = m, math.sqrt(2 * eps / h_scalar)
+                y = center.unsqueeze(0) + scale * z
+                phi = 0.5 * kappa * y.square().sum(1) + beta * (1 - torch.cos(y)).sum(1)
+                f = phi + 0.5 * (x.unsqueeze(0) - y).square().sum(1)
+                log_target = -f.double() / (2 * eps)
+                log_q = -0.5 * ((y - center.unsqueeze(0)) / scale).double().square().sum(1)
+                log_q = log_q - d * math.log(scale)
+                lw = log_target - log_q
+                l1 = torch.logsumexp(lw, 0)
+                l2 = torch.logsumexp(2 * lw, 0)
+                ess = torch.exp(2 * l1 - l2 - math.log(a.k)).clamp(0, 1)
+                ess_values.append(float(ess))
+                spread_values.append(float(lw.std(correction=0)))
+            rows.append({
+                "family": family, "eps": eps, "d": d, "K": a.k,
+                "ess_over_K_mean": sum(ess_values) / len(ess_values),
+                "ess_over_K_std": float(torch.tensor(ess_values).std(correction=0)),
+                "logw_spread_mean": sum(spread_values) / len(spread_values),
+                "M3_exact": m3_exact,
+                "d_M3_sq_eps": d * m3_exact * m3_exact * eps,
+            })
+
+fields = list(rows[0])
+with (a.out / "proposal_eps_d.csv").open("w", newline="", encoding="utf-8") as f:
+    w = csv.DictWriter(f, fieldnames=fields); w.writeheader(); w.writerows(rows)
+(a.out / "proposal_eps_d.json").write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
+
+try:
+    import matplotlib; matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fig, axes = plt.subplots(2, 3, figsize=(14, 8), sharex=True, sharey=True)
+    for ax, d in zip(axes.ravel(), dims):
+        for family in families:
+            rr = [r for r in rows if r["d"] == d and r["family"] == family]
+            ax.plot([r["eps"] for r in rr], [r["ess_over_K_mean"] for r in rr], "o-", label=family)
+        ax.set_xscale("log"); ax.invert_xaxis(); ax.set_title(f"d={d}")
+        ax.grid(alpha=.3); ax.set_ylim(0, 1.05)
+    axes[0,0].legend(fontsize=8); fig.supxlabel("epsilon"); fig.supylabel("normalized ESS/K")
+    fig.tight_layout(); fig.savefig(a.out / "proposal_ess_vs_eps_and_d.png", dpi=180); plt.close(fig)
+except Exception as exc:
+    (a.out / "plot_error.txt").write_text(str(exc), encoding="utf-8")
+print(f"wrote {len(rows)} rows to {a.out}")
+PYPROPOSAL
+
+cat > "$CONTROL/m3_probe.py" <<'PYM3'
+"""Directional finite-difference M3 proxy on trained epsilon variants."""
+from __future__ import annotations
+import argparse, csv, gc, json, math, sys
+from pathlib import Path
+import torch, yaml
+
+p = argparse.ArgumentParser()
+p.add_argument("--code", type=Path, required=True)
+p.add_argument("--run-root", type=Path, required=True)
+p.add_argument("--steps", type=int, required=True)
+p.add_argument("--probes", type=int, default=3)
+p.add_argument("--fd-step", type=float, default=1e-2)
+a = p.parse_args()
+sys.path.insert(0, str(a.code.resolve()))
+from inference import _load_model
+from torch.nn.attention import sdpa_kernel, SDPBackend
+
+root = a.run_root.resolve()
+runs = [("base", root / "configs/base.yaml", root / "train/base")]
+for eps in (0.2, 0.1, 0.05, 0.02, 0.01):
+    name = f"eps_{eps:g}"
+    runs.append((name, root / f"configs/{name}.yaml", root / f"train/{name}"))
+
+rows = []
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+for run_id, config, workdir in runs:
+    ckpt = workdir / "checkpoints" / f"state_{a.steps:08d}.pt"
+    row = {"run_id": run_id, "config": str(config), "ckpt": str(ckpt)}
+    try:
+        if not ckpt.is_file(): raise FileNotFoundError(ckpt)
+        cfg = yaml.safe_load(config.read_text(encoding="utf-8"))
+        row["requested_eps_min"] = float(cfg["pt"]["schedule"]["eps_min"])
+        model, _, _, _, potential, _, trained_eps = _load_model(
+            str(ckpt), str(config), want_potential=True)
+        row["checkpoint_eps"] = float(trained_eps)
+        gen = torch.Generator(device=device).manual_seed(1234)
+        labels = torch.zeros(1, dtype=torch.long, device=device)
+        with torch.no_grad():
+            out = model(c=labels, cfg_scale=1.0, deterministic=True, train=False, rng=gen)
+            m = out["samples"].detach().float()
+        values = []
+        for probe in range(a.probes):
+            g = torch.Generator(device=device).manual_seed(9000 + probe)
+            v = torch.empty_like(m).bernoulli_(0.5, generator=g).mul_(2).sub_(1)
+            v = v / v.flatten(1).norm(dim=1).view(-1, *([1] * (v.ndim - 1)))
+            curvatures = []
+            for sign in (-1.0, 1.0):
+                x = (m + sign * a.fd_step * v).detach().requires_grad_(True)
+                with torch.enable_grad(), sdpa_kernel(SDPBackend.MATH):
+                    phi = potential.phi(x, labels).sum()
+                    grad = torch.autograd.grad(phi, x, create_graph=True)[0]
+                    hv = torch.autograd.grad((grad * v).sum(), x)[0]
+                    curvatures.append(float((hv * v).sum().detach()))
+            values.append(abs(curvatures[1] - curvatures[0]) / (2 * a.fd_step))
+        row.update(
+            directional_M3_proxy_mean=sum(values) / len(values),
+            directional_M3_proxy_max=max(values), probes=a.probes,
+            fd_step=a.fd_step, status="ok")
+        del model, potential, out, m
+        gc.collect()
+        if torch.cuda.is_available(): torch.cuda.empty_cache()
+    except Exception as exc:
+        row.update(status="error", error=f"{type(exc).__name__}: {exc}")
+    rows.append(row)
+
+outdir = root / "results"; outdir.mkdir(parents=True, exist_ok=True)
+(outdir / "m3_vs_eps.json").write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
+fields = sorted({k for r in rows for k in r})
+with (outdir / "m3_vs_eps.csv").open("w", newline="", encoding="utf-8") as f:
+    w = csv.DictWriter(f, fieldnames=fields); w.writeheader(); w.writerows(rows)
+print(json.dumps(rows, indent=2))
+PYM3
+
+cat > "$CONTROL/collect_report.py" <<'PYREPORT'
+from __future__ import annotations
+import argparse, csv, json, math
+from pathlib import Path
+
+p = argparse.ArgumentParser()
+p.add_argument("--run-root", type=Path, required=True)
+a = p.parse_args(); root = a.run_root.resolve(); report = root / "report"; report.mkdir(parents=True, exist_ok=True)
+
+def read_json(path):
+    try: return json.loads(path.read_text(encoding="utf-8"))
+    except Exception: return None
+
+def metric_summary(workdir):
+    path = workdir / "log" / "metrics.jsonl"
+    if not path.is_file(): return {"metrics_status": "missing"}
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try: rows.append(json.loads(line))
+        except json.JSONDecodeError: pass
+    if not rows: return {"metrics_status": "empty"}
+    tail = rows[-min(200, len(rows)):]
+    out = {"metrics_status": "ok", "logged_step": rows[-1].get("step")}
+    keys = ("pt/ess", "pt/ess_min", "pt/control_ess", "pt/ess_ema", "pt/sched_eps",
+            "pt/logw_spread", "pt/prox_resid_rel", "pt/sched_lambda_prox",
+            "total_time", "profile/peak_allocated_gib")
+    for key in keys:
+        vals = [float(x[key]) for x in tail if key in x and isinstance(x[key], (int,float)) and math.isfinite(float(x[key]))]
+        if vals:
+            safe = key.replace("/", "_")
+            out[f"{safe}_last"] = vals[-1]; out[f"{safe}_tail_mean"] = sum(vals)/len(vals); out[f"{safe}_tail_min"] = min(vals)
+    return out
+
+train_runs = [("base", root / "train/base", root / "results/train__base.json")]
+manifest = root / "control/train_variants.tsv"
+if manifest.is_file():
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        run_id, _, workdir, result = line.split("\t")
+        train_runs.append((run_id, Path(workdir), Path(result)))
+train_rows = []
+for run_id, workdir, result in train_runs:
+    row = {"run_id": run_id, "result_file": str(result), "status": "missing"}
+    value = read_json(result)
+    if isinstance(value, dict): row.update(value); row["status"] = "ok"
+    row.update(metric_summary(workdir)); train_rows.append(row)
+
+infer_rows = []
+imanifest = root / "control/inference_variants.tsv"
+if imanifest.is_file():
+    for line in imanifest.read_text(encoding="utf-8").splitlines():
+        run_id, sampler, cfg, n, gamma, k, result, _ = line.split("\t")
+        row = {"run_id": run_id, "sampler": sampler, "cfg_scale_requested": cfg,
+               "n": n, "gamma": gamma, "K": k, "status": "missing"}
+        value = read_json(Path(result))
+        if isinstance(value, dict): row.update(value); row["status"] = "ok"
+        infer_rows.append(row)
+
+def write_csv(path, rows):
+    fields = sorted({k for r in rows for k in r}, key=lambda k: (k not in ("run_id","status","fid"), k))
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fields); w.writeheader(); w.writerows(rows)
+
+write_csv(report / "training_summary.csv", train_rows)
+write_csv(report / "inference_summary.csv", infer_rows)
+
+like = read_json(root / "results/likelihood_K.json") or {}
+ladder = like.get("ladder", []) if isinstance(like, dict) else []
+write_csv(report / "likelihood_K.csv", ladder)
+
+def finite_fid(rows):
+    return sorted((r for r in rows if isinstance(r.get("fid"), (int,float)) and math.isfinite(float(r["fid"]))), key=lambda r: float(r["fid"]))
+
+best_train, best_infer = finite_fid(train_rows), finite_fid(infer_rows)
+proposal_csv = root / "results/proposal/proposal_eps_d.csv"
+m3_csv = root / "results/m3_vs_eps.csv"
+missing_train = [r["run_id"] for r in train_rows if r["status"] != "ok"]
+missing_infer = [r["run_id"] for r in infer_rows if r["status"] != "ok"]
+
+lines = [
+    "# PT-Flow screening ablation report", "",
+    f"Run: `{root.name}`", "",
+    "> Screening only: short training and reduced-sample FID. Confirm selected settings with full training, 50k FID, and at least three seeds.", "",
+    "## Completion", "",
+    f"- Training results: {len(train_rows)-len(missing_train)}/{len(train_rows)}", f"- Inference results: {len(infer_rows)-len(missing_infer)}/{len(infer_rows)}",
+    f"- Missing training: {', '.join(missing_train) if missing_train else 'none'}", f"- Missing inference: {', '.join(missing_infer) if missing_infer else 'none'}", "",
+    "## Best screening FID from training variants", "", "| rank | run | FID | ESS tail | eps last | sec/step tail |", "|---:|---|---:|---:|---:|---:|",
+]
+for i, r in enumerate(best_train[:10], 1):
+    lines.append(f"| {i} | {r['run_id']} | {float(r['fid']):.4f} | {r.get('pt_ess_tail_mean','')} | {r.get('pt_sched_eps_last','')} | {r.get('total_time_tail_mean','')} |")
+lines += ["", "## Best screening FID from inference sweeps", "", "| rank | run | sampler | FID | cfg | n | gamma | K |", "|---:|---|---|---:|---:|---:|---:|---:|"]
+for i, r in enumerate(best_infer[:15], 1):
+    lines.append(f"| {i} | {r['run_id']} | {r.get('sampler','')} | {float(r['fid']):.4f} | {r.get('cfg_scale_requested','')} | {r.get('n','')} | {r.get('gamma','')} | {r.get('K','')} |")
+lines += ["", "## Required evidence files", "", f"- Proposal family x epsilon x dimension: `{proposal_csv}`", f"- Directional M3 proxy vs epsilon: `{m3_csv}`", f"- Likelihood L(K): `{report/'likelihood_K.csv'}`", f"- Training metrics including pt/ess: `{report/'training_summary.csv'}`", f"- n/gamma, sampler K, and cfg_scale: `{report/'inference_summary.csv'}`", "",
+          "## Interpretation limits", "", "- `directional_M3_proxy` is a finite-difference directional proxy, not the full operator norm M3.", "- Mode C finite-K SNIS and nested-MC likelihood values are finite-budget estimates.", "- Select candidates here; do not report these short-run FIDs as final benchmark numbers.", ""]
+(report / "REPORT.md").write_text("\n".join(lines), encoding="utf-8")
+
+try:
+    import matplotlib; matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    if best_train:
+        rr = best_train[:15][::-1]; fig, ax = plt.subplots(figsize=(9,6)); ax.barh([r["run_id"] for r in rr], [r["fid"] for r in rr]); ax.set_xlabel("screening FID (lower is better)"); fig.tight_layout(); fig.savefig(report/"training_fid.png", dpi=180); plt.close(fig)
+    cfgrows = sorted((r for r in infer_rows if r["run_id"].startswith("cfg_") and isinstance(r.get("fid"),(int,float))), key=lambda r: float(r["cfg_scale_requested"]))
+    if cfgrows:
+        fig, ax = plt.subplots(); ax.plot([float(r["cfg_scale_requested"]) for r in cfgrows], [r["fid"] for r in cfgrows], "o-"); ax.set(xlabel="cfg_scale", ylabel="FID"); ax.grid(alpha=.3); fig.tight_layout(); fig.savefig(report/"cfg_scale_fid.png", dpi=180); plt.close(fig)
+    m3 = []
+    m3json = read_json(root / "results/m3_vs_eps.json")
+    if isinstance(m3json, list): m3 = [r for r in m3json if r.get("status")=="ok"]
+    if m3:
+        m3.sort(key=lambda r: float(r["checkpoint_eps"]), reverse=True); fig, ax = plt.subplots(); ax.plot([r["checkpoint_eps"] for r in m3], [r["directional_M3_proxy_max"] for r in m3], "o-"); ax.set(xlabel="checkpoint epsilon", ylabel="directional M3 proxy (max)"); ax.set_xscale("log"); ax.grid(alpha=.3); fig.tight_layout(); fig.savefig(report/"M3_proxy_vs_eps.png", dpi=180); plt.close(fig)
+except Exception as exc:
+    (report / "plot_error.txt").write_text(str(exc), encoding="utf-8")
+
+print(f"wrote {report/'REPORT.md'}")
+PYREPORT
+
+cat > "$CONTROL/setup.slurm" <<'SETUPJOB'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+# shellcheck disable=SC1090
+source "$SETTINGS_FILE"
+module purge
+module load "$ANACONDA_MODULE"
+eval "$(conda shell.bash hook)"
+if [[ ! -x "$ENV_PREFIX/bin/python" ]]; then
+  conda create -y -p "$ENV_PREFIX" python=3.11 pip
+fi
+conda activate "$ENV_PREFIX"
+
+if [[ ! -d "$CODE/.git" ]]; then
+  git clone "$REPO_URL" "$CODE"
+  cd "$CODE"
+  git checkout "$REPO_REF"
+else
+  echo "Reusing existing immutable checkout: $CODE"
+  cd "$CODE"
+fi
+for required in train.py inference.py scripts/make_run_config.py dataset/latent.py; do
+  [[ -f "$required" ]] || { echo "ERROR: repository is missing $required at $(git rev-parse HEAD)" >&2; exit 1; }
+done
+git rev-parse HEAD | tee "$CONTROL/git_commit.txt"
+git status --short > "$CONTROL/git_status.txt"
+
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install --index-url "$TORCH_INDEX_URL" torch==2.5.1 torchvision==0.20.1
+python -m pip install -r requirements.txt gdown matplotlib
+
+export PTFLOW_ASSETS PTFLOW_DATA CIFAR10_PATH CIFAR10_FID_NPZ TORCH_HUB_DIR
+export HF_HOME IMAGENET_PATH IMAGENET_CACHE_PATH IMAGENET_FID_NPZ
+export PYTHONUNBUFFERED TOKENIZERS_PARALLELISM OMP_NUM_THREADS DRIFT_COMPILE
+mkdir -p "$PTFLOW_ASSETS/fid_stats" "$PTFLOW_DATA" "$TORCH_HUB_DIR" "$HF_HOME"
+python -m pytest -q
+if [[ "$BUILD_IMAGENET_LATENTS" == 1 ]]; then
+  # The SD-VAE is required for latent creation; the MAE is downloaded here as
+  # well so the resulting cache is ready for a later ImageNet training run.
+  python -m misc.download_pretrained
+else
+  echo "Skipping ImageNet VAE/MAE downloads for this CIFAR-only run."
+fi
+python -m misc.download_cifar10
+if [[ ! -s "$CIFAR10_FID_NPZ" ]]; then
+  python -m scripts.make_cifar10_fid_stats --out "$CIFAR10_FID_NPZ" --batch-size 128 --split train
+fi
+python "$CONTROL/make_configs.py" --code "$CODE" --run-root "$RUN_ROOT" \
+  --steps "$STEPS" --seed "$SEED" --world-size "$NPROC"
+python -m scripts.preflight --config "$RUN_ROOT/configs/base.yaml" \
+  --world-size "$NPROC" --check-assets --check-features
+python -m pip freeze > "$CONTROL/pip_freeze.txt"
+touch "$CONTROL/setup.ok"
+echo "SETUP COMPLETE"
+SETUPJOB
+
+cat > "$CONTROL/train_eval.slurm" <<'TRAINJOB'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+source "$(dirname "$SETTINGS_FILE")/job_env.sh"
+if [[ "${BASE_RUN:-0}" == 1 ]]; then
+  RUN_ID=base; CONFIG="$RUN_ROOT/configs/base.yaml"; TRAIN_DIR="$RUN_ROOT/train/base"; RESULT="$RUN_ROOT/results/train__base.json"
+else
+  LINE="$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" "$CONTROL/train_variants.tsv")"
+  [[ -n "$LINE" ]] || { echo "missing train manifest row $SLURM_ARRAY_TASK_ID" >&2; exit 1; }
+  IFS=$'\t' read -r RUN_ID CONFIG TRAIN_DIR RESULT <<< "$LINE"
+fi
+echo "TRAIN $RUN_ID"
+python -m scripts.preflight --config "$CONFIG" --world-size "$NPROC" --check-assets
+FINAL_CKPT="$TRAIN_DIR/checkpoints/$(printf 'state_%08d.pt' "$STEPS")"
+if [[ ! -s "$FINAL_CKPT" ]]; then
+  mkdir -p "$TRAIN_DIR"
+  srun --ntasks=1 torchrun --standalone --nproc_per_node="$NPROC" \
+    train.py --config "$CONFIG" --workdir "$TRAIN_DIR"
+fi
+[[ -s "$FINAL_CKPT" ]] || { echo "missing exact final checkpoint $FINAL_CKPT" >&2; exit 1; }
+if [[ ! -s "$RESULT" ]]; then
+  mkdir -p "$RUN_ROOT/eval/train_$RUN_ID"
+  srun --ntasks=1 torchrun --standalone --nproc_per_node="$NPROC" \
+    inference.py evaluate --ckpt "$FINAL_CKPT" --config "$CONFIG" \
+    --sampler A --cfg-scale 1.2 --num-samples "$FID_SAMPLES" --gen-bsz "$GEN_BSZ" \
+    --seed "$SEED" --workdir "$RUN_ROOT/eval/train_$RUN_ID" --json-out "$RESULT"
+fi
+echo "COMPLETE $RUN_ID $RESULT"
+TRAINJOB
+
+cat > "$CONTROL/inference.slurm" <<'INFERJOB'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+source "$(dirname "$SETTINGS_FILE")/job_env.sh"
+LINE="$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" "$CONTROL/inference_variants.tsv")"
+[[ -n "$LINE" ]] || { echo "missing inference row $SLURM_ARRAY_TASK_ID" >&2; exit 1; }
+IFS=$'\t' read -r RUN_ID SAMPLER CFG N GAMMA K RESULT OUTDIR <<< "$LINE"
+CKPT="$RUN_ROOT/train/base/checkpoints/$(printf 'state_%08d.pt' "$STEPS")"
+[[ -s "$CKPT" ]] || { echo "missing base checkpoint $CKPT" >&2; exit 1; }
+ARGS=(--sampler "$SAMPLER" --cfg-scale "$CFG")
+case "$SAMPLER" in
+  A) ;;
+  B) ARGS+=(--refine-steps "$N" --refine-gamma "$GAMMA") ;;
+  C) ARGS+=(--snis-k "$K") ;;
+  *) echo "unknown sampler $SAMPLER" >&2; exit 1 ;;
+esac
+if [[ ! -s "$RESULT" ]]; then
+  mkdir -p "$OUTDIR"
+  srun --ntasks=1 torchrun --standalone --nproc_per_node="$NPROC" \
+    inference.py evaluate --ckpt "$CKPT" --config "$RUN_ROOT/configs/base.yaml" \
+    "${ARGS[@]}" --num-samples "$FID_SAMPLES" --gen-bsz "$GEN_BSZ" --seed "$SEED" \
+    --workdir "$OUTDIR" --json-out "$RESULT"
+fi
+echo "COMPLETE $RUN_ID $RESULT"
+INFERJOB
+
+cat > "$CONTROL/likelihood.slurm" <<'LIKEJOB'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+source "$(dirname "$SETTINGS_FILE")/job_env.sh"
+CKPT="$RUN_ROOT/train/base/checkpoints/$(printf 'state_%08d.pt' "$STEPS")"
+RESULT="$RUN_ROOT/results/likelihood_K.json"
+[[ -s "$CKPT" ]] || { echo "missing base checkpoint $CKPT" >&2; exit 1; }
+if [[ ! -s "$RESULT" ]]; then
+  mkdir -p "$RUN_ROOT/eval/likelihood"
+  srun --ntasks=1 torchrun --standalone --nproc_per_node=1 \
+    inference.py likelihood --ckpt "$CKPT" --config "$RUN_ROOT/configs/base.yaml" \
+    --num-batches 8 --bsz 8 --k-inner 16 --k-ladder 8,16,32,64,128,256 \
+    --seed "$SEED" --workdir "$RUN_ROOT/eval/likelihood" --json-out "$RESULT"
+fi
+LIKEJOB
+
+cat > "$CONTROL/proposal.slurm" <<'PROPOSALJOB'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+source "$(dirname "$SETTINGS_FILE")/job_env.sh"
+srun --ntasks=1 python "$CONTROL/proposal_diagnostic.py" --out "$RUN_ROOT/results/proposal" --k 512 --repeats 4
+PROPOSALJOB
+
+cat > "$CONTROL/m3.slurm" <<'M3JOB'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+source "$(dirname "$SETTINGS_FILE")/job_env.sh"
+srun --ntasks=1 python "$CONTROL/m3_probe.py" --code "$CODE" --run-root "$RUN_ROOT" --steps "$STEPS" --probes 3
+M3JOB
+
+cat > "$CONTROL/latent.slurm" <<'LATENTJOB'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+source "$(dirname "$SETTINGS_FILE")/job_env.sh"
+[[ -d "$IMAGENET_PATH/train" && -d "$IMAGENET_PATH/val" ]] || {
+  echo "ERROR: expected ImageFolder train/ and val/ under $IMAGENET_PATH" >&2; exit 1; }
+TRAIN_CLASSES="$(find "$IMAGENET_PATH/train" -mindepth 1 -maxdepth 1 -type d | wc -l)"
+VAL_CLASSES="$(find "$IMAGENET_PATH/val" -mindepth 1 -maxdepth 1 -type d | wc -l)"
+[[ "$TRAIN_CLASSES" -eq 1000 && "$VAL_CLASSES" -eq 1000 ]] || {
+  echo "ERROR: expected 1000 train and val class directories, got $TRAIN_CLASSES and $VAL_CLASSES" >&2; exit 1; }
+srun --ntasks=1 python -m dataset.latent --data-path "$IMAGENET_PATH" \
+  --target-path "$IMAGENET_CACHE_PATH" --local-batch-size 128 \
+  --num-workers 12 --prefetch-factor 2 --pin-memory
+ls -lh "$IMAGENET_CACHE_PATH"
+LATENTJOB
+
+cat > "$CONTROL/report.slurm" <<'REPORTJOB'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+source "$(dirname "$SETTINGS_FILE")/job_env.sh"
+python "$CONTROL/collect_report.py" --run-root "$RUN_ROOT"
+REPORTJOB
+
+SBATCH_SITE=(--partition="$PARTITION")
+[[ -n "$ACCOUNT" ]] && SBATCH_SITE+=(--account="$ACCOUNT")
+submit_job() {
+  local raw
+  raw="$(sbatch --parsable "${SBATCH_SITE[@]}" --export=ALL,SETTINGS_FILE="$SETTINGS" "$@")"
+  printf '%s' "${raw%%;*}"
+}
+
+SETUP_JOB="$(submit_job --job-name="ptf_setup_$TAG" --nodes=1 --ntasks=1 \
+  --cpus-per-task=16 --mem=64gb --time=06:00:00 --gpus="${GPU_TYPE}:1" --requeue \
+  --output="$LOGS/setup_%j.out" "$CONTROL/setup.slurm")"
+
+BASE_JOB="$(submit_job --dependency="afterok:$SETUP_JOB" --job-name="ptf_base_$TAG" \
+  --nodes=1 --ntasks=1 --cpus-per-task=16 --mem=96gb --time=36:00:00 \
+  --gpus="${GPU_TYPE}:${NPROC}" --requeue --output="$LOGS/base_%j.out" \
+  --export=ALL,SETTINGS_FILE="$SETTINGS",BASE_RUN=1 "$CONTROL/train_eval.slurm")"
+
+TRAIN_JOB="$(submit_job --dependency="afterok:$SETUP_JOB" --job-name="ptf_train_$TAG" \
+  --array="0-15%${MAX_TRAIN_JOBS}" --nodes=1 --ntasks=1 --cpus-per-task=16 \
+  --mem=96gb --time=36:00:00 --gpus="${GPU_TYPE}:${NPROC}" --requeue \
+  --output="$LOGS/train_%A_%a.out" "$CONTROL/train_eval.slurm")"
+
+INFER_JOB="$(submit_job --dependency="afterok:$BASE_JOB" --job-name="ptf_infer_$TAG" \
+  --array="0-21%${MAX_EVAL_JOBS}" --nodes=1 --ntasks=1 --cpus-per-task=16 \
+  --mem=64gb --time=18:00:00 --gpus="${GPU_TYPE}:${NPROC}" --requeue \
+  --output="$LOGS/infer_%A_%a.out" "$CONTROL/inference.slurm")"
+
+LIKELIHOOD_JOB="$(submit_job --dependency="afterok:$BASE_JOB" --job-name="ptf_like_$TAG" \
+  --nodes=1 --ntasks=1 --cpus-per-task=12 --mem=64gb --time=12:00:00 \
+  --gpus="${GPU_TYPE}:1" --requeue --output="$LOGS/likelihood_%j.out" "$CONTROL/likelihood.slurm")"
+
+PROPOSAL_JOB="$(submit_job --dependency="afterok:$SETUP_JOB" --job-name="ptf_prop_$TAG" \
+  --nodes=1 --ntasks=1 --cpus-per-task=4 --mem=32gb --time=02:00:00 \
+  --gpus="${GPU_TYPE}:1" --requeue --output="$LOGS/proposal_%j.out" "$CONTROL/proposal.slurm")"
+
+M3_JOB="$(submit_job --dependency="afterany:$BASE_JOB:$TRAIN_JOB" --job-name="ptf_m3_$TAG" \
+  --nodes=1 --ntasks=1 --cpus-per-task=8 --mem=64gb --time=12:00:00 \
+  --gpus="${GPU_TYPE}:1" --requeue --output="$LOGS/m3_%j.out" "$CONTROL/m3.slurm")"
+
+LATENT_JOB=none
+if [[ "$BUILD_IMAGENET_LATENTS" == 1 ]]; then
+  LATENT_JOB="$(submit_job --dependency="afterok:$SETUP_JOB" --job-name="ptf_latent_$TAG" \
+    --nodes=1 --ntasks=1 --cpus-per-task=16 --mem=96gb --time=72:00:00 \
+    --gpus="${GPU_TYPE}:1" --requeue --output="$LOGS/latent_%j.out" "$CONTROL/latent.slurm")"
+fi
+
+REPORT_JOB="$(submit_job \
+  --dependency="afterany:$BASE_JOB:$TRAIN_JOB:$INFER_JOB:$LIKELIHOOD_JOB:$PROPOSAL_JOB:$M3_JOB" \
+  --job-name="ptf_report_$TAG" --nodes=1 --ntasks=1 --cpus-per-task=2 \
+  --mem=8gb --time=01:00:00 --output="$LOGS/report_%j.out" "$CONTROL/report.slurm")"
+
+cat > "$SUBMISSION" <<EOF
+export SETUP_JOB=$SETUP_JOB
+export BASE_JOB=$BASE_JOB
+export TRAIN_JOB=$TRAIN_JOB
+export INFER_JOB=$INFER_JOB
+export LIKELIHOOD_JOB=$LIKELIHOOD_JOB
+export PROPOSAL_JOB=$PROPOSAL_JOB
+export M3_JOB=$M3_JOB
+export LATENT_JOB=$LATENT_JOB
+export REPORT_JOB=$REPORT_JOB
+EOF
+
+cat <<EOF
+PT-Flow screening ablation submitted.
+  tag:          $TAG
+  setup:        $SETUP_JOB
+  base:         $BASE_JOB
+  train array:  $TRAIN_JOB (16 variants, max $MAX_TRAIN_JOBS concurrent)
+  infer array:  $INFER_JOB (22 variants, max $MAX_EVAL_JOBS concurrent)
+  likelihood:   $LIKELIHOOD_JOB
+  proposal test:$PROPOSAL_JOB
+  M3 proxy:     $M3_JOB
+  latent cache: $LATENT_JOB
+  report:       $REPORT_JOB
+
+Logs:   $LOGS
+Report: $RUN_ROOT/report/REPORT.md
+Status: ABL_TAG=$TAG bash "$0" status
+EOF

@@ -1,0 +1,84 @@
+B_PT_Full: IMAGENET LATENT B, 30K, 2 H200 GPUs
+
+1. Upload submit_B_PT_Full.py to this exact path on Palmetto:
+   /scratch/mdraihk/ptflow/submit_B_PT_Full.py
+
+2. Run in the Palmetto SSH terminal:
+
+   source ~/ptflow_env.sh
+   python /scratch/$USER/ptflow/submit_B_PT_Full.py submit
+
+The launcher finds completed cosine pilot job 16199241 and copies its private
+code snapshot to a NEW run directory. No existing job or source file is edited.
+The Slurm name and W&B training name are both B_PT_Full.
+
+Training:
+  30,000 fresh optimizer updates, not a continuation from W-Flow step 200,000.
+  W-Flow B 200K EMA generator weights initialize both generator and generator EMA.
+  Generator optimizer, PT potential, scale network and PT optimizer start fresh.
+  Save and retain every 1,000-step checkpoint (1K ... 30K).
+  2 H200 GPUs; 16 CPUs; 256G host RAM; 72-hour allocation.
+  Same architecture and data configuration as the cosine pilot.
+  Global generated batch 1024 = 16 label groups x 64 generated samples.
+  Per GPU: 8 label groups; 4 accumulation chunks; 128 generated samples/chunk.
+  Generator LR 5e-6, potential/scale LR 2e-5; preserve 20-step LR warmups and
+  constant learning-rate schedule from the pilot. The total horizon is 30K.
+  Preserve rematerialization, streamed real features and checkpointed MAE features.
+  No new compiler/precision or core training changes.
+
+PT configuration:
+  active_recovery_v1: potential and scale updates continue every iteration;
+  schedule progress uses optimizer iterations, not the old healthy-step counter.
+  K=16; full prox derivative; prox warmup 20, ramp 80, max lambda=0.02.
+  Epsilon cosine: 0.10 through completed step 20, 0.075 at 10,020,
+  0.05 at 20,020 and thereafter.
+  Defensive mixture: preserve the pilot's 0.5 normally / 0.75 when degraded.
+  Scale loss weight remains 0.1.
+  Temporary alignment calibration: weight 0.1 through 1,000, fades to 0 by 5,000.
+  Optional curvature regularization remains disabled as in the pilot.
+  Nonfinite and existing refined-estimator failure checks remain enabled.
+  Generator-proposal ESS remains a separate diagnostic; a "healthy" refined
+  ESS label is not a certificate of generator matching or improved FID.
+
+Requeue/resume:
+  20 minutes before wall time, request a checkpoint at an optimizer boundary.
+  After the saved-checkpoint marker, requeue the same job ID. Local full model,
+  optimizer, PT, EMA and schedule state are restored. Do not reload the source
+  W-Flow checkpoint over this run's own checkpoint on requeue.
+  Finished FID evaluations are retained and reused after requeue.
+  Existing estimator failure stops are not automatically retried.
+  This does not promise bitwise-identical RNG/data-order continuation.
+
+Evaluation/report:
+  FID-50K for the initializer EMA, final EMA and final raw generator.
+  Mode A, CFG 1.2, seed 42, streaming backend, gen_bsz 32/rank.
+  No automatic periodic FID within training; checkpoints allow later evaluation.
+  Reports are report/fid.csv and report/summary.json beneath the job directory.
+  W&B project: ptflow-active-diagnostic; training run name: B_PT_Full.
+  A COMPLETED file appears only after the 30K checkpoint and all three FIDs.
+
+After submission, define the paths in any new terminal:
+
+   FULL_HOME=$(cat /scratch/$USER/ptflow/active_pt/latest_B_PT_Full.txt)
+   JOB=$(cat "$FULL_HOME/job_id.txt")
+   RUN="$FULL_HOME/B_PT_Full"
+
+Monitor:
+   squeue -j "$JOB" -o "%.12i %.28j %.3t %.12M %R"
+   tail -F "$FULL_HOME/logs/B_PT_Full_${JOB}.out" "$FULL_HOME/logs/B_PT_Full_${JOB}.err"
+
+Status/checkpoints/results:
+   cat "$RUN/pt_status.json"
+   ls -lh "$RUN/checkpoints"
+   cat "$FULL_HOME/report/fid.csv"
+   cat "$FULL_HOME/report/summary.json"
+
+Accounting:
+   sacct -X -j "$JOB" --format=JobID,JobName%24,State,ExitCode,Elapsed,NodeList
+
+Timing/quality:
+  The pilot's 5.33 it/s was FID generation/inception, not training.
+  Training was about 8.5 seconds/update: roughly 71 hours for 30K, before overhead.
+  Runtime can change with training state and hardware load.
+  The 200-step pilots did not establish a FID improvement. This longer experiment
+  is explicitly requested by the user; no low-FID or healthy-convergence claim.

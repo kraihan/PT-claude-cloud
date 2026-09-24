@@ -1,0 +1,219 @@
+# Paste this WHOLE block into the Palmetto login terminal. No upload needed.
+# One bounded diagnostic job; no changes to production or existing trainer code.
+(
+set -euo pipefail
+source "$HOME/ptflow_env.sh"
+WORK="/scratch/$USER/ptflow"
+SOURCE="$WORK/active_pt/B_H200x2_30k_20260923_141250"
+REPO="$SOURCE/PT-Flow"
+test -s "$SOURCE/active_B_30k.yaml"
+test -s "$SOURCE/settings.sh"
+test -s "$REPO/train.py"
+test -s "$REPO/inference.py"
+
+OLD_JOB=$(cat "$SOURCE/job_id.txt")
+QUEUED=$(squeue -h -u "$USER" -o '%i')
+if grep -Fxq "$OLD_JOB" <<< "$QUEUED"; then
+    echo "The previous job $OLD_JOB is still queued/running. This pilot assumes it was cancelled."
+    exit 1
+fi
+
+PILOT=$(mktemp -d "$WORK/active_pt/B_pilot200_$(date +%Y%m%d_%H%M%S)_XXXXXX")
+mkdir -p "$PILOT/logs" "$PILOT/report"
+python - "$SOURCE" "$PILOT" <<'PY'
+import copy
+import json
+from pathlib import Path
+import sys
+import yaml
+
+source, out = map(Path, sys.argv[1:])
+ckpts = sorted((source / "run/checkpoints").glob("state_*.pt"))
+print("Cancelled run checkpoints:", [str(p) for p in ckpts] or "NONE")
+print("Pilot starts fresh from W-Flow EMA weights; cancelled run files are preserved.")
+cfg = yaml.safe_load((source / "active_B_30k.yaml").read_text())
+assert cfg["pt"]["schedule"]["policy"] == "active_recovery_v1"
+assert cfg["pipeline"] == "imagenet_latent"
+train = cfg["train"]
+initializer = Path(train["init_ema_from"])
+assert initializer.is_file(), f"Missing initializer: {initializer}"
+for name in ("resume_from", "init_from", "init_generator_from"):
+    train.pop(name, None)
+train.update(total_steps=200, save_per_step=50, keep_every=50, keep_last=2,
+    train_batch_size=16, grad_accum_steps=4, feature_chunk_size=16,
+    feature_cache_gib=0., profile_every=20, benchmark_steps=0,
+    eval_per_step=0, eval_at_start=False, compile_generator=False)
+train["forward_dict"]["gen_per_label"] = 64
+cfg.setdefault("feature", {}).update(chunk_size=16, checkpoint=True)
+cfg["optimizer"]["lr_schedule"].update(learning_rate=5e-6, warmup_steps=20,
+                                      total_steps=200, lr_schedule="const")
+pt = cfg["pt"]
+pt.update(enabled=True, K=16, noise_bsz=8, data_bsz=32, prox_period=1,
+          prox_max_batch=4, prox_mode="full", prox_norm="none", potential_chunk=16)
+pt["optimizer"]["lr_schedule"].update(learning_rate=2e-5, warmup_steps=20,
+                                     total_steps=200, lr_schedule="const")
+pt["schedule"].update(eps_schedule="constant", eps_max=.1, eps_min=.1,
+    eps_warmup=0, eps_anneal_steps=200,
+    prox_warmup=20, prox_ramp=80, lambda_prox_max=.02,
+    alpha_def_start=.5, alpha_def_end=.5, alpha_def_degraded=.75,
+    alignment_weight=.1, alignment_hold=200, alignment_end=201,
+    recovery_check_after=50, recovery_bad_patience=50)
+cfg.setdefault("logging", {}).update(use_wandb=True, log_every_k=10,
+                                     project="ptflow-active-diagnostic")
+path = out / "pilot.yaml"
+path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+(out / "initializer.txt").write_text(str(initializer) + "\n")
+(out / "source.txt").write_text(str(source) + "\n")
+(out / "plan.json").write_text(json.dumps(dict(
+    source=str(source), initializer=str(initializer), train_steps=200,
+    global_generated_per_update=1024, label_groups_per_rank=8,
+    accumulation_chunks_per_rank=4, generated_microbatch_per_rank=128,
+    pt_noise_batch_per_rank=8, eps=.1, prox_warmup=20, lambda_max=.02,
+    fid_samples=10000, sampler="A", cfg_scale=1.2, eval_seed=42,
+    note="Diagnostic only; no automatic long-run promotion. FID-10K is not FID-50K."
+), indent=2) + "\n")
+print("Created:", path)
+print("200 steps; global batch 1024; saves 50/100/150/200; lambda reaches 0.02 at 100.")
+print("Epsilon stays 0.1 intentionally, to test tracking before cooling.")
+PY
+
+cat > "$PILOT/report.py" <<'PY'
+import csv
+import json
+import math
+from pathlib import Path
+import statistics
+import sys
+
+root = Path(sys.argv[1])
+report = root / "report"
+report.mkdir(exist_ok=True)
+results = []
+protocol = None
+for tag in ("initializer_ema", "pilot_ema", "pilot_raw"):
+    path = report / f"{tag}.json"
+    if not path.is_file():
+        continue
+    obj = json.loads(path.read_text())
+    signature = [obj.get(k) for k in ("num_samples", "seed", "cfg_scale", "mode",
+                    "world_size", "gen_bsz", "fid_ref", "backend", "feature_extractor")]
+    if protocol is None:
+        protocol = signature
+    elif signature != protocol:
+        raise RuntimeError("FID protocols differ; refusing a combined comparison")
+    if not math.isfinite(float(obj["fid"])):
+        raise RuntimeError("Nonfinite FID")
+    results.append(dict(model=tag, new_steps=0 if tag == "initializer_ema" else 200,
+        checkpoint_step=obj["step"], fid_10k=obj["fid"], num_samples=obj["num_samples"],
+        cfg_scale=obj["cfg_scale"], seed=obj["seed"]))
+with (report / "fid.csv").open("w", newline="") as f:
+    writer = csv.DictWriter(f, fieldnames=["model", "new_steps", "checkpoint_step", "fid_10k",
+                                         "num_samples", "cfg_scale", "seed"])
+    writer.writeheader()
+    writer.writerows(results)
+status = root / "run/pt_status.csv"
+rows = list(csv.DictReader(status.open())) if status.is_file() else []
+active = [r for r in rows if r.get("pt/lambda_prox") and float(r["pt/lambda_prox"]) > 0]
+def numbers(records, key):
+    return [float(r[key]) for r in records if r.get(key) not in (None, "", "null")
+            and math.isfinite(float(r[key]))]
+summary = dict(completed_steps=int(rows[-1]["step"]) if rows else 0,
+    full_run_checkpoint=(root / "run/checkpoints/state_00000200.pt").is_file(),
+    prox_observed=bool(active), complete_fid_comparison=len(results) == 3,
+    decision="REVIEW_REQUIRED: do not automatically submit 30k")
+for key in ("pt/generator_proposal_control_ess", "pt/prox_resid_rel", "pt/loss_alignment"):
+    early = numbers(active[:3], key)
+    late = numbers(active[-3:], key)
+    summary[key] = dict(first_active_median=statistics.median(early) if early else None,
+                        last_active_median=statistics.median(late) if late else None)
+raw = summary["pt/generator_proposal_control_ess"]["last_active_median"]
+summary["proposal_near_floor_below_0p05"] = None if raw is None else raw < .05
+metrics = root / "run/log/metrics.jsonl"
+timing_rows = []
+if metrics.is_file():
+    timing_rows = [json.loads(line) for line in metrics.read_text().splitlines() if line.strip()]
+    timing_rows = [r for r in timing_rows if r.get("step", 0) >= 40]
+times = numbers(timing_rows, "total_time")
+summary["median_logged_step_seconds_after40"] = statistics.median(times) if times else None
+summary["mean_profile_seconds"] = {
+    key: statistics.mean(numbers(timing_rows, key))
+    for key in sorted({k for r in timing_rows for k in r if k.startswith("profile/")})
+    if numbers(timing_rows, key)
+}
+summary["caveat"] = "Training diagnostics, not held-out certificates. Compare raw weights as well as EMA; 200 steps is not convergence."
+(report / "diagnostics.json").write_text(json.dumps(summary, indent=2) + "\n")
+print((report / "fid.csv").read_text())
+print(json.dumps(summary, indent=2))
+print("Report directory:", report)
+PY
+
+cat > "$PILOT/pilot.sbatch" <<'SBATCH'
+#!/bin/bash
+#SBATCH --job-name=pt-B-pilot200
+#SBATCH --partition=work1
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --gpus=h200:2
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=256G
+#SBATCH --time=08:00:00
+
+set -Eeuo pipefail
+source "$HOME/ptflow_env.sh"
+PILOT=$1
+SOURCE=$(cat "$PILOT/source.txt")
+source "$SOURCE/settings.sh"
+REPO="$SOURCE/PT-Flow"
+cd "$REPO"
+export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+export DRIFT_COMPILE=0 TORCHDYNAMO_DISABLE=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4
+mkdir -p "$PILOT/run" "$PILOT/report"
+trap 'CODE=$?; python "$PILOT/report.py" "$PILOT" || true; exit "$CODE"' EXIT
+echo "Job $SLURM_JOB_ID; bounded 200-step diagnostic: $PILOT"
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+INIT=$(cat "$PILOT/initializer.txt")
+evaluate() {
+    srun --ntasks=1 torchrun --standalone --nproc_per_node=2 inference.py evaluate \
+        --config "$PILOT/pilot.yaml" --ckpt "$1" --sampler A --cfg-scale 1.2 \
+        --num-samples 10000 --seed 42 --gen-bsz 32 --eval-backend streaming \
+        --workdir "$PILOT/eval_$2" --json-out "$PILOT/report/$2.json"
+}
+evaluate "$INIT" initializer_ema
+srun --ntasks=1 torchrun --standalone --nproc_per_node=2 train.py \
+    --config "$PILOT/pilot.yaml" --workdir "$PILOT/run"
+FINAL="$PILOT/run/checkpoints/state_00000200.pt"
+test -s "$FINAL"
+evaluate "$FINAL" pilot_ema
+
+# The inference loader uses its EMA slot. This evaluation-only adapter puts
+# RAW generator weights there; it is explicitly labelled raw in the report.
+# No optimizer or PT state is exported; never use this file to resume training.
+python - "$FINAL" "$PILOT/report/raw_generator_for_eval.pt" <<'PY'
+import sys
+import torch
+src = torch.load(sys.argv[1], map_location="cpu", weights_only=False)
+assert int(src["step"]) == 200
+torch.save(dict(step=src["step"], ema_model=src["model"],
+    model_behavior=src.get("model_behavior", {}),
+    weights_kind="RAW_GENERATOR_EVALUATION_ONLY"), sys.argv[2])
+PY
+evaluate "$PILOT/report/raw_generator_for_eval.pt" pilot_raw
+echo "Pilot finished; no continuation job submitted."
+SBATCH
+
+RESPONSE=$(sbatch --parsable --chdir="$REPO" \
+    --output="$PILOT/logs/pilot_%j.out" --error="$PILOT/logs/pilot_%j.err" \
+    "$PILOT/pilot.sbatch" "$PILOT")
+JOB=${RESPONSE%%;*}
+[[ "$JOB" =~ ^[0-9]+$ ]] || { echo "Unexpected sbatch response: $RESPONSE"; exit 1; }
+printf '%s\n' "$JOB" > "$PILOT/job_id.txt"
+printf '%s\n' "$PILOT" > "$WORK/active_pt/latest_pilot.txt"
+echo "Submitted pilot job: $JOB"
+echo "Folder: $PILOT"
+echo "tail -F $PILOT/logs/pilot_${JOB}.out $PILOT/logs/pilot_${JOB}.err"
+echo "Reports: $PILOT/report/fid.csv and $PILOT/report/diagnostics.json"
+squeue -j "$JOB" -o '%.16i %.30j %.3t %.12M %R'
+)

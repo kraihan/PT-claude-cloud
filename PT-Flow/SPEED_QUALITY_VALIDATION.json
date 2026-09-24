@@ -1,0 +1,22 @@
+{
+  "date": "2026-09-18",
+  "environment": {"torch": "2.4.1+cpu", "cuda_available": false, "platform": "Windows", "python": "3.12"},
+  "tests": {
+    "legacy_regressions": {"passed": 38},
+    "performance_and_launcher_tests": {"passed": 23},
+    "two_rank_gloo_smoke": {
+      "optimized_generator_training": "passed",
+      "potential_gradient_synchronization": "passed",
+      "uneven_sample_count_fid_moment_reduction": "passed"
+    },
+    "bash_syntax_and_mock_slurm_submission": "passed for benchmark, eval and finetune",
+    "python_source_syntax": "passed; notebook exports with IPython syntax excluded"
+  },
+  "not_measured": ["H100 throughput", "CUDA peak memory", "new CIFAR FID", "new ImageNet FID", "real Slurm execution"],
+  "notes": [
+    "Early Windows permission failures were resolved by allowing local test-directory access.",
+    "An initial mock Slurm fixture assumed the Linux USER environment variable; it was corrected to pass explicit asset/data paths.",
+    "Synthetic singular FID covariances trigger an expected SciPy warning; CPU checkpoint tests trigger a PyTorch deprecation warning.",
+    "Recipe names express intended tradeoffs, not verified model rankings or guaranteed FID."
+  ]
+}

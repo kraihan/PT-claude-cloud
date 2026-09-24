@@ -1,0 +1,199 @@
+# PT-Flow XL/2 -- RESUMES A W-FLOW CHECKPOINT IN PLACE.
+#
+# The `model:` block below is copied verbatim from configs/gen/baseline_XL.yaml, so DitGen built from
+# this config is shape-identical to the reference release.  A baseline state_*.pt at
+# step N drops straight into <workdir>/checkpoints/ and training continues from
+# step N, with the PT-Flow potential starting fresh.  Enforced by
+# tests/test_ckpt_compat.py -- do not edit `model:` without re-running it.
+#
+#   mkdir -p $WORKDIR/checkpoints
+#   cp $BASELINE_HF_ROOT/checkpoints/latent_sota_XL_ot/state_00180000.pt $WORKDIR/checkpoints/
+#   torchrun --nproc_per_node=8 train.py --config configs/gen/ptflow_XL.yaml --workdir $WORKDIR
+#
+# model.residual stays false: the released weights were trained as m(x)=net(x),
+# not x+net(x).  It is a behaviour flag with no parameters, so it does not affect
+# shapes -- but flipping it would change what those weights mean.
+#
+# The generator LR is dropped to 5e-5 and the potential gets its own optimizer:
+# this is a continuation of a converged run, not a fresh one.
+
+pipeline: imagenet_latent
+
+logging:
+  use_wandb: true
+  log_every_k: 20
+dataset:
+  resolution: 256
+  use_aug: false
+  use_latent: true
+  use_cache: true
+  num_classes: 1000
+  batch_size: 512
+  eval_batch_size: 2048
+  kwargs:
+    num_workers: 8
+    pin_memory: true
+    prefetch_factor: 2
+model:
+  cond_dim: 1152
+  input_size: 32
+  in_channels: 4
+  patch_size: 2
+  hidden_size: 1152
+  depth: 28
+  num_heads: 16
+  mlp_ratio: 4.0
+  out_channels: 4
+  use_qknorm: true
+  use_swiglu: true
+  use_rope: true
+  use_rmsnorm: true
+  n_cls_tokens: 16
+  noise_classes: 64
+  noise_coords: 32
+  use_bf16: true
+  attn_fp32: false
+  use_remat: true
+  residual: false
+optimizer:
+  lr_schedule:
+    learning_rate: 5.0e-05
+    warmup_steps: 2000
+    lr_schedule: const
+    total_steps: 100000
+  weight_decay: 0.01
+  adam_b1: 0.9
+  adam_b2: 0.95
+train:
+  diverse_noise: true
+  train_batch_size: 128
+  seed: 42
+  total_steps: 200000
+  save_per_step: 2000
+  keep_every: 20000
+  eval_per_step: 2500
+  pos_per_sample: 128
+  neg_per_sample: 32
+  positive_bank_size: 128
+  negative_bank_size: 1000
+  push_per_step: 128
+  grad_accum_steps: 8
+  forward_dict:
+    gen_per_label: 64
+    cfg_min: 1.0
+    cfg_max: 4.0
+    neg_cfg_pw: 4.0
+    no_cfg_frac: 0.2
+  activation_kwargs:
+    patch_mean_size:
+    - 2
+    - 4
+    patch_std_size:
+    - 2
+    - 4
+    use_std: true
+    use_mean: true
+    every_k_block: 2
+  loss_kwargs:
+    R_list:
+    - 0.01
+  cfg_list:
+  - 1.0
+  - 1.1
+  - 1.2
+  - 1.4
+  - 1.6
+  - 1.8
+  - 2.0
+  - 2.5
+  - 3.0
+  - 3.5
+  ema_decay: 0.999
+  ot_mode: debiased
+  ot_kwargs:
+    sinkhorn_num_iter: 1
+    use_new_cfg: true
+    disable_diag_mask: true
+    resample_neg: true
+    batch_sinkhorn: false
+    use_quadratic_cost: true
+feature:
+  mae_path: hf://mae_latent_640
+  use_mae: true
+  use_convnext: false
+pt:
+  enabled: true
+  K: 8
+  noise_bsz: 32
+  data_bsz: 32
+  p_uncond: 0.1
+  potential_chunk: 0
+  prox_max_batch: 128
+  prox_mode: detach
+  scale_K: 4
+  scale_mode: learned
+  lambda_gauge: 0.1
+  lambda_mag: 0.0
+  logw_clip: 0.0
+  max_grad_norm: 1.0
+  curv_probe: false
+  curv_allow: 0.5
+  ema_decay: 0.999
+  model:
+    hidden_size: 512
+    depth: 8
+    num_heads: 8
+    patch_size: 2
+    mlp_ratio: 4.0
+    use_qknorm: true
+    use_swiglu: true
+    use_rope: true
+    use_rmsnorm: true
+    n_cls_tokens: 0
+    use_bf16: true
+    attn_fp32: true
+    phi_scale: null
+    quad_anchor: 0.0
+    output_mode: phi
+  scale_model:
+    hidden_size: 256
+    depth: 4
+    num_heads: 4
+    patch_size: 2
+    mlp_ratio: 4.0
+    use_qknorm: true
+    use_swiglu: true
+    use_rope: true
+    use_rmsnorm: true
+    n_cls_tokens: 0
+    use_bf16: true
+    attn_fp32: true
+    scale_max: 3.0
+  optimizer:
+    weight_decay: 0.01
+    adam_b1: 0.9
+    adam_b2: 0.95
+    lr_schedule:
+      learning_rate: 0.0002
+      warmup_steps: 1000
+      lr_schedule: cosine
+      total_steps: 200000
+  schedule:
+    eps_max: 0.1
+    eps_min: 0.005
+    eps_anneal_steps: 66666
+    eps_warmup: 500
+    alpha_def_start: 0.05
+    alpha_def_end: 0.01
+    alpha_def_degraded: 0.25
+    prox_warmup: 40000
+    prox_ramp: 50000
+    lambda_prox_max: 0.2
+    prox_decay_on_degrade: 0.999
+    lambda_scale: 0.1
+    lambda_curv: 0.0
+    theta_period: 1
+    theta_period_degraded: 2
+    ess_healthy: 0.3
+    ess_broken: 0.05
+    ess_ema_decay: 0.98

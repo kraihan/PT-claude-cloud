@@ -1,0 +1,56 @@
+PT-FLOW K-ONLY MINI ABLATION
+
+This add-on does not edit train.py or any PT-Flow core file. It invokes the
+real train.py through the existing parallel ablation runner.
+
+It launches four independent jobs:
+  K=2, K=4, K=8, K=16
+
+Every job uses the prepared ImageNet latent subset (50 images/class), B/2
+model, 4,000 optimizer steps, one A100 GPU, and a final 10,000-image FID
+evaluation. K=32 is intentionally omitted. There is no smoke job. You may
+select H100 or H200 instead, but all four jobs use the same GPU type so GPU
+differences do not confound the K comparison.
+
+Upload PT-Flow-K-mini-ablation.zip into:
+  /scratch/$USER/ptflow-ablation/PT-Flow
+
+Then run:
+
+source ~/ptflow_env.sh
+cd /scratch/$USER/ptflow-ablation/PT-Flow
+unzip -o PT-Flow-K-mini-ablation.zip
+export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
+
+# Remove only the obsolete six-factor smoke/dispatcher, if still queued.
+scancel 16116060 16116061 2>/dev/null || true
+
+# Verify the four-job plan; this does no GPU work.
+python scripts/run_k_mini_ablation.py plan --gpu a100
+
+# Submit four independent one-GPU jobs and one dependent CPU report job.
+python scripts/run_k_mini_ablation.py submit --gpu a100
+
+# Optional: replace a100 in both commands with h100 or h200.
+
+# Monitor.
+squeue -u "$USER" -o "%.12i %.32j %.3t %.12M %R"
+
+Expected GPU job names:
+  pt6p-K_2
+  pt6p-K_4
+  pt6p-K_8
+  pt6p-K_16
+
+The report job is pt6p-report. It runs after all four GPU jobs finish, even if
+one fails, so the CSV records every status that is available.
+
+Final file:
+  /scratch/$USER/ptflow-ablation/runs/ablation_imagenet_B_subset50_K_4k/report/ablation.csv
+
+The CSV has exactly four rows, one final-checkpoint FID row for each K. No
+intermediate checkpoints are evaluated. W&B group:
+  imagenet_B_subset50_K_4k
+
+If the report job is unavailable or must be rebuilt manually:
+  python scripts/run_k_mini_ablation.py report --gpu a100

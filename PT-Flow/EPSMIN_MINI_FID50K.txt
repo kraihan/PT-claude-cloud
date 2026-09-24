@@ -1,0 +1,49 @@
+PT-FLOW EPS_MIN MINI ABLATION WITH FINAL FID-50K
+
+This add-on invokes the real train.py in the isolated PT-Flow checkout. It
+does not alter the original running repository or any core source file.
+
+Four independent A100 jobs:
+  eps_min=0.20
+  eps_min=0.10
+  eps_min=0.05 (ours)
+  eps_min=0.02
+
+Fixed schedule for a meaningful 4K-step comparison:
+  eps_max=0.20, eps_warmup=200, eps_anneal_steps=3000
+
+Every arm uses the prepared ImageNet latent subset (50 images/class), B/2
+model, 4,000 optimizer steps, and exactly one final 50,000-image FID.
+
+Upload PT-Flow-epsmin-mini-fid50k.zip into:
+  /scratch/$USER/ptflow/PT-Flow/
+
+Run:
+
+source ~/ptflow_env.sh
+ZIP="/scratch/$USER/ptflow/PT-Flow/PT-Flow-epsmin-mini-fid50k.zip"
+REPO="/scratch/$USER/ptflow-ablation/PT-Flow"
+unzip -o "$ZIP" -d "$REPO"
+cd "$REPO"
+export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
+
+python scripts/run_epsmin_mini_ablation.py plan
+python scripts/run_epsmin_mini_ablation.py submit
+squeue -u "$USER" -o "%.12i %.32j %.3t %.12M %R"
+
+Expected GPU jobs:
+  pt6p-epsmin_0p20
+  pt6p-epsmin_0p10
+  pt6p-epsmin_0p05_ours
+  pt6p-epsmin_0p02
+
+The CPU report job is pt6p-report and waits for all four experiments.
+
+Final CSV:
+  /scratch/$USER/ptflow-ablation/runs/ablation_imagenet_B_subset50_epsmin_4k_fid50k/report/ablation.csv
+
+W&B group:
+  imagenet_B_subset50_epsmin_4k_fid50k
+
+Manual report recovery:
+  python scripts/run_epsmin_mini_ablation.py report

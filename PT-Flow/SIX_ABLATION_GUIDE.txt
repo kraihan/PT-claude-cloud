@@ -1,0 +1,206 @@
+PT-FLOW: SIX ABLATION SWEEPS FROM ONE YAML / ONE SUBMISSION COMMAND
+
+This is a CIFAR-10 screening experiment for ONE H200. It submits six Slurm
+jobs with dependencies, so at most one job in this chain runs at a time.
+Each job contains one parameter sweep, not just one parameter value.
+
+Requirements
+------------
+Use PT-Flow with an existing ptflow environment, prepared CIFAR-10 data,
+feature weights and FID assets. This add-on does not install Python/CUDA or
+download datasets. The launcher supports the earlier PNG-FID engine and the
+updated streaming-FID engine, inspecting actual source signatures before
+submission. It omits unsupported performance options on the earlier engine.
+EMA-only initialization requires an engine with --init-ema; fresh runs do not.
+
+The add-on ZIP contains:
+  configs/ablation/six_h200.yaml
+  configs/ablation/six_h200_4k_wandb.yaml
+  scripts/run_six_ablation.py
+  utils/logging.py
+  SIX_ABLATION_GUIDE.txt
+  tests/test_six_ablation.py
+  tests/test_ablation_wandb.py
+
+Copy/extract these files into the PT-Flow repository, retaining the directories.
+Existing train.py, inference.py and model code are not changed by this add-on.
+The updated utils/logging.py saves local metrics alongside W&B, so enabling
+online monitoring does not remove the metrics used by the CSV report.
+
+Start on the Palmetto login node
+-------------------------------
+conda activate ptflow
+cd /scratch/$USER/ptflow/PT-Flow
+
+# If necessary, unpack the uploaded add-on here:
+# unzip -o /path/to/PT-Flow-six-ablation-wandb.zip
+
+# Authenticate privately on the cluster BEFORE submitting jobs:
+python -m pip install --upgrade wandb
+wandb login
+
+# Ready-made 4k/arm, one-H200 configuration with W&B enabled:
+python scripts/run_six_ablation.py submit configs/ablation/six_h200_4k_wandb.yaml
+
+# This writes ../runs/ablation_six_h200_4k_wandb/report/ablation.csv.
+# The remaining examples explain the original 5k manifest. Submit ONE manifest.
+
+# Inspect/edit the few machine-specific settings:
+nano configs/ablation/six_h200.yaml
+
+Check environment paths, slurm.account (blank means your default), and walltime.
+All paths in the YAML resolve relative to the repository directory. By default,
+assets and data are its siblings: ../assets and ../data. No credentials go in
+the YAML. Activate the correct environment BEFORE submitting: workers use the
+same absolute Python interpreter and inherit the submission environment.
+
+# Preview: no GPU use, no Slurm submission, no output directory created.
+python scripts/run_six_ablation.py plan configs/ablation/six_h200.yaml
+
+# THIS ONE COMMAND submits all six jobs:
+python scripts/run_six_ablation.py submit configs/ablation/six_h200.yaml
+
+squeue -u "$USER"
+
+The job IDs are printed and saved in ../runs/ablation_six_h200/submissions.json.
+Dependency order: proposal -> eps -> K -> lambda_prox_max -> n -> cfg_scale.
+Palmetto documents work1 batch jobs and the h200 GPU resource code here:
+https://docs.rcd.clemson.edu/palmetto/job_management/submit/
+https://docs.rcd.clemson.edu/palmetto/job_management/sched/
+
+What runs
+---------
+Reference: defensive diagonal, eps=0.1, K=8, lambda=0.1, n=0, CFG=1.2.
+All arms use primary generator EMA=0.999 and the same seeds/settings.
+
+Job 1: proposal = defensive diagonal, naive, recentered isotropic, diagonal.
+       Four training runs, including the shared reference.
+Job 2: eps = 0.02, 0.05, 0.10, 0.20.
+       Three new training runs; reuse reference at 0.10.
+Job 3: training K = 4, 8, 16.
+       Two new training runs; reuse reference at 8. scale_K stays fixed at 4.
+Job 4: lambda_prox_max = 0.0, 0.1, 0.2.
+       Two new training runs; reuse reference at 0.1.
+Job 5: refinement n = 0, 1, 2, 4; gamma=0.5, CFG=1.2.
+       NO retraining; three new evaluations of the reference checkpoint.
+Job 6: CFG = 1.0, 1.2, 1.5, 2.0; n=0.
+       NO retraining; three new evaluations of the reference checkpoint.
+
+Total: 11 training configurations, 17 unique FID evaluations, 22 table rows.
+Repeated reference rows are the SAME measurement, not independent replicas.
+Default cost: 11 x 5000 = 55,000 optimizer iterations, plus FID evaluation.
+Set steps: 4000 for 44,000 total iterations. The six jobs are sequential on the
+single GPU; scheduling all of them does not make this a 5,000-step total budget.
+time: 24:00:00 is the limit PER Slurm job; no runtime has been measured on H200.
+
+Initialization and short schedules
+----------------------------------
+The default is fresh training using the compact CIFAR configuration. To start
+every arm from your existing generator checkpoint, edit BOTH of these fields:
+
+base_config: ../runs/cifar_180k/config.json
+init_ema_checkpoint: ../runs/cifar_180k/checkpoints/state_00180000.pt
+
+Use an actual existing state filename. Set optimizer.lr_schedule.learning_rate
+under overrides if a lower fine-tuning LR is desired; 0.00005 is a screening
+candidate, not a validated optimum. The saved config supplies the EXACT model
+architecture. Do not substitute a different model config for a checkpoint.
+
+EMA-only initialization starts fresh PT potential/scale networks, optimizers
+and schedule for each branch. It does not continue the source run's old 180k
+step counter or 20k/40k proximal warmup. Label these results as short generator-
+initialized fine-tuning studies; they are not full PT-checkpoint continuation.
+
+For all branches, proximal warmup=500 and ramp=1000. Epsilon is held constant
+at its tested value. Defensive alpha is fixed across all scheduler health
+states in each proposal arm. Health gating remains active. If the actual
+pt/lambda_prox stays zero, the report flags that arm: its proximal influence
+has not been exercised. lambda=0 still trains the potential and does not measure
+the cost of disabling PT completely.
+
+Outputs and restart
+-------------------
+Default output folder: /scratch/$USER/ptflow/runs/ablation_six_h200
+
+  report/REPORT.md        Human-readable six-factor table and limitations.
+  report/ablation.csv     FID, ESS, actual/scheduled lambda, timing and statuses.
+  configs/               All 11 fully expanded training configurations.
+  train/<arm>/           Checkpoints, config snapshots, log/metrics.jsonl.
+  results/               Raw FID evaluation JSON files (17 when successful).
+  logs/                  Per-command logs plus Slurm stdout/stderr.
+  status/                Execution attempts and per-stage failure lists.
+  plan.json              Frozen resolved experiment design.
+  source_sha256.json     Engine source hashes captured at submission.
+
+Reports update after each attempted configuration. The original metrics JSONL
+contains the full training curves, including pt/ess and pt/control_ess.
+Timed GPU phases are included when profile_every emits them. The mean logged
+iteration time is not an independent synchronized throughput benchmark.
+Evaluation time includes Inception/FID processing. This add-on does not measure
+peak VRAM; use the separate performance benchmark for that measurement.
+
+If a job fails, later independent sweeps still run (afterany dependencies).
+Inference sweeps need the completed reference checkpoint; missing checkpoints
+are reported as failures. Read status/stage_*.json and logs before retrying.
+
+# Retry after interruption/failure with the SAME manifest and output directory:
+python scripts/run_six_ablation.py submit configs/ablation/six_h200.yaml --resume
+
+Completed training checkpoints and valid FID results are reused. Partial
+training resumes its latest local state_*.pt checkpoint, saved every 1000
+steps. If no checkpoint exists, that arm starts again. A resumed chain waits
+behind the prior submission if it is still queued/running. This is checkpoint
+recovery, not a promise of bitwise-identical data/RNG replay.
+Manifest/base-config changes are rejected when resuming; use a NEW output_dir
+for a changed experiment. Keep engine code fixed during the study.
+
+# Rebuild reports without submitting work:
+python scripts/run_six_ablation.py report ../runs/ablation_six_h200/plan.json
+
+Weights & Biases monitoring
+--------------------------
+W&B is enabled in the supplied YAML. Project: ptflow-ablation. Group: the
+output-directory name, unless wandb.group overrides it. Set wandb.entity to
+your team slug if you need a particular team; null uses your login default.
+
+Each training arm has a named run (reference, eps_0p02, K_4, etc.). Loss, ESS,
+control ESS, actual/scheduled proximal weight, learning rates, and timing
+metrics are uploaded at logging.log_every_k intervals (default 20).
+Training run URLs appear in logs/train_<arm>.log. In the project dashboard,
+filter/group by the shared group name to compare arms.
+
+A separate ablation-report run in the same group receives the FID comparison
+table, scalar FIDs and versioned CSV/Markdown artifacts after evaluation.
+FID is measured AFTER each arm finishes training, not every 20 steps.
+report/wandb.json records the report URL or a remote-upload error. The CSV
+and local metrics remain available if report upload fails.
+
+Your screenshot shows the KEY ID. W&B requires the FULL API key shown once
+when it is created. If you saved only the ID, create another API key in W&B
+settings, then paste the full key privately at the wandb login prompt. Do not
+place it in this YAML, a shell command argument, or a shared script.
+Official authentication guide: https://docs.wandb.ai/models/quickstart
+
+If compute nodes cannot reach W&B, set wandb.mode: offline BEFORE submission.
+That records W&B data for later `wandb sync`; it cannot provide a live remote
+dashboard. The local CSV is still written. Online login/initialization errors
+in training are shown in the per-arm logs and must be fixed before retrying.
+
+# Re-upload a completed/current report without GPU work:
+python scripts/run_six_ablation.py report ../runs/ablation_six_h200_4k_wandb/plan.json --sync-wandb
+
+W&B settings are frozen at submission. These changes apply to new runs; they
+do not turn monitoring on inside an already running process or old frozen
+job chain. Do not submit duplicate training if your earlier chain is running.
+
+Interpretation
+--------------
+Default FID uses 10,000 samples for screening. Re-evaluate finalists with
+50,000 samples and additional training seeds before reporting small FID gains.
+Fresh 4-5k runs do not establish final convergence or the lowest achievable
+FID. Refinement can reduce its prox objective without improving FID.
+This package covers only the six listed factors; it does not include dimension
+scaling, M3 estimation, or likelihood convergence diagnostics.
+
+Validation of this add-on uses CPU tests with mocked Slurm/GPU commands.
+No Palmetto jobs or H200 measurements have been performed by preparing it.

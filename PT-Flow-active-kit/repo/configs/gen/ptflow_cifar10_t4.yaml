@@ -1,0 +1,180 @@
+pipeline: cifar10_pixel
+logging:
+  use_wandb: false
+  log_every_k: 20
+dataset:
+  name: cifar10
+  resolution: 32
+  use_aug: true
+  use_latent: false
+  use_cache: false
+  num_classes: 10
+  batch_size: 256
+  eval_batch_size: 128
+  kwargs:
+    num_workers: 2
+    pin_memory: true
+    prefetch_factor: 2
+model:
+  cond_dim: 384
+  input_size: 32
+  in_channels: 3
+  patch_size: 2
+  hidden_size: 384
+  depth: 8
+  num_heads: 6
+  mlp_ratio: 4.0
+  out_channels: 3
+  use_qknorm: true
+  use_swiglu: true
+  use_rope: true
+  use_rmsnorm: true
+  n_cls_tokens: 0
+  noise_classes: 0
+  noise_coords: 1
+  use_bf16: true
+  attn_fp32: false
+  residual: true
+  precision: auto
+optimizer:
+  lr_schedule:
+    learning_rate: 0.0002
+    warmup_steps: 2000
+    lr_schedule: const
+    total_steps: 200000
+  weight_decay: 0.01
+  adam_b1: 0.9
+  adam_b2: 0.95
+train:
+  diverse_noise: true
+  train_batch_size: 16
+  seed: 42
+  total_steps: 200000
+  save_per_step: 2000
+  keep_every: 20000
+  keep_last: 2
+  eval_per_step: 10000
+  pos_per_sample: 16
+  neg_per_sample: 8
+  positive_bank_size: 256
+  negative_bank_size: 1000
+  push_per_step: 64
+  grad_accum_steps: 2
+  forward_dict:
+    gen_per_label: 16
+    cfg_min: 1.0
+    cfg_max: 4.0
+    neg_cfg_pw: 3.0
+    no_cfg_frac: 0.0
+  activation_kwargs:
+    convnext_kwargs:
+      image_size: 128
+  loss_kwargs:
+    R_list:
+    - 0.05
+  cfg_list:
+  - 1.0
+  - 1.2
+  - 1.5
+  - 2.0
+  ema_decay: 0.999
+  ot_mode: debiased
+  ot_kwargs:
+    sinkhorn_num_iter: 10
+    use_new_cfg: true
+    disable_diag_mask: true
+    resample_neg: true
+    batch_sinkhorn: false
+    use_quadratic_cost: true
+  eval_samples: 50000
+  eval_at_start: false
+  feature_chunk_size: 64
+  push_at_resume: 20
+pt:
+  enabled: true
+  K: 8
+  noise_bsz: 16
+  data_bsz: 16
+  p_uncond: 0.1
+  potential_chunk: 32
+  prox_max_batch: 32
+  prox_mode: detach
+  scale_K: 4
+  scale_mode: learned
+  lambda_gauge: 0.1
+  lambda_mag: 0.0
+  logw_clip: 0.0
+  max_grad_norm: 1.0
+  curv_probe: false
+  curv_allow: 0.5
+  ema_decay: 0.999
+  model:
+    cond_dim: 128
+    hidden_size: 128
+    depth: 3
+    num_heads: 4
+    patch_size: 4
+    mlp_ratio: 4.0
+    use_qknorm: true
+    use_swiglu: true
+    use_rope: true
+    use_rmsnorm: true
+    n_cls_tokens: 0
+    use_bf16: false
+    attn_fp32: true
+    phi_scale: null
+    quad_anchor: 0.0
+    output_mode: phi
+  scale_model:
+    cond_dim: 64
+    hidden_size: 64
+    depth: 2
+    num_heads: 4
+    patch_size: 4
+    mlp_ratio: 4.0
+    use_qknorm: true
+    use_swiglu: true
+    use_rope: true
+    use_rmsnorm: true
+    n_cls_tokens: 0
+    use_bf16: false
+    attn_fp32: true
+    scale_max: 3.0
+  optimizer:
+    weight_decay: 0.01
+    adam_b1: 0.9
+    adam_b2: 0.95
+    lr_schedule:
+      learning_rate: 0.0002
+      warmup_steps: 1000
+      lr_schedule: const
+      total_steps: 200000
+  schedule:
+    eps_max: 0.2
+    eps_min: 0.005
+    eps_anneal_steps: 60000
+    eps_warmup: 5000
+    alpha_def_start: 0.1
+    alpha_def_end: 0.01
+    alpha_def_degraded: 0.25
+    prox_warmup: 5000
+    prox_ramp: 15000
+    lambda_prox_max: 0.1
+    prox_decay_on_degrade: 0.999
+    lambda_scale: 0.1
+    lambda_curv: 0.0
+    theta_period: 2
+    theta_period_degraded: 4
+    ess_healthy: 0.3
+    ess_broken: 0.05
+    ess_ema_decay: 0.98
+    health_check_period: 20
+  prox_norm: bounded_rms
+feature:
+  use_mae: false
+  use_convnext: true
+  convnext_bf16: true
+  mae_path: ''
+  chunk_size: 64
+  checkpoint: false
+  convnext_model: tiny

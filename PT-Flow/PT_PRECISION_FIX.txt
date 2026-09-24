@@ -1,0 +1,58 @@
+PT-FLOW BF16 GENERATOR -> FP32 POTENTIAL FIX
+
+Diagnosis from smoke job 16115753
+-------------------------------
+Training failed when the proximal loss switched on:
+  RuntimeError: mat1 and mat2 must have the same dtype,
+  but got BFloat16 and Float
+
+The generator returned BF16 samples. The potential used FP32 linear weights
+without converting those samples. This was a code-level precision boundary
+error. The dispatcher cancellation was the intended afterok failure behavior.
+The displayed 31.35 seconds is a first-iteration measurement, not a reliable
+steady-state throughput measurement. This patch does not establish GPU speed
+or FID quality; the full A100 smoke test still needs to pass.
+
+Fix
+---
+Only two runtime files change: ptflow/potential.py and utils/precision.py.
+PotentialNet and ScaleNet convert inputs to their parameter dtype without
+detaching the autograd graph. FP32 heads explicitly disable ambient autocast.
+Potential input gradients and the combined CFG branches operate in FP32.
+Generator BF16, architecture, checkpoint parameter names, objective, dataset,
+4k budget, Slurm resources, W&B and output locations are preserved.
+
+INSTALL AND SCHEDULE A FRESH RETRY
+--------------------------------
+Upload PT-Flow-prox-precision-fix.zip to /scratch/$USER/ptflow/PT-Flow.
+Run this block on the login node. The small check uses CPU only, no data/assets.
+
+source ~/ptflow_env.sh
+cd /scratch/$USER/ptflow/PT-Flow
+
+cp -n ptflow/potential.py ptflow/potential.py.before_bf16_fix
+cp -n utils/precision.py utils/precision.py.before_bf16_fix
+unzip -o PT-Flow-prox-precision-fix.zip
+
+python -m scripts.check_pt_precision && python scripts/submit_imagenet_slurm.py
+squeue -u "$USER" -o "%.12i %.32j %.3t %.12M %R"
+
+No old job ID is required. The scheduler submits new preparation, smoke and
+dispatch jobs. Preparation reuses the verified latent subset. The new smoke
+job has a new output directory and starts clean. If it passes, the dispatcher
+submits the 17 GPU tasks and CPU report. Do not bypass this GPU smoke test.
+
+No command cancels your long-running ImageNet/CIFAR jobs or changes checkpoints.
+Already running Python processes keep their imported code; new/restarted jobs
+load the fixed modules. All future ablation arms use the same corrected code.
+
+Regression scope
+----------------
+The exact BF16/FP32 exception was reproduced locally before the fix. Tests
+cover FP16/BF16 inputs, FP32 potential and scale outputs, input/parameter
+gradients, both proximal-loss modes, higher-order CFG gradients, training
+smoke tests and checkpoint compatibility. The included check additionally
+executes four-step Mode B with BF16 generator outputs, without a GPU.
+
+PyTorch's documented precision-boundary behavior:
+https://docs.pytorch.org/docs/2.14/amp.html

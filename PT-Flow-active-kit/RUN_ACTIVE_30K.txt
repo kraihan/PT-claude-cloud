@@ -1,0 +1,204 @@
+PT-FLOW B/2: FRESH 30K RUN, W-FLOW WEIGHTS ONLY, TWO H200 GPUs
+
+This is an isolated experimental recovery recipe. It starts at step zero.
+The W-Flow EMA generator weights initialize the generator and its EMA. Its
+200,000-step counter, optimizer moments and PT state are NOT loaded.
+The generator is trainable. The potential and scale networks start fresh.
+There is no fixed teacher loss against the original W-Flow checkpoint.
+
+UPLOAD
+Upload PT-Flow-active-30k-kit.zip to:
+  /scratch/mdraihk/ptflow/PT-Flow/PT-Flow-active-30k-kit.zip
+
+RUN THIS ENTIRE BLOCK ON THE PALMETTO LOGIN NODE
+(
+  set -euo pipefail
+  source "$HOME/ptflow_env.sh"
+  ZIP="/scratch/$USER/ptflow/PT-Flow/PT-Flow-active-30k-kit.zip"
+  test -s "$ZIP"
+  KIT=$(mktemp -d "$HOME/ptflow-active-kit.XXXXXX")
+  unzip -q "$ZIP" -d "$KIT"
+  bash "$KIT/submit.sh"
+)
+
+This submits ONE 2-GPU Slurm job. It does not cancel any existing jobs.
+The production repository and the existing run folders are not edited.
+The package is a complete Python source snapshot; dependencies and datasets
+are reused from your existing environment. No new pip install is requested.
+The GPU allocation runs checks first, then starts the full training run in
+the same allocation. No separate dependent smoke/dispatch jobs are required.
+
+INPUTS
+Base model/feature configuration, read only:
+  /scratch/$USER/ptflow/PT-Flow/configs/gen/ptflow_B_warmstart_180k.yaml
+Exact generator initializer, read only:
+  /scratch/$USER/ptflow/baseline_wflow/checkpoints/latent_sota_B_ot/state_00200000.pt
+Full ImageNet-1k cache, default:
+  /scratch/$USER/ptflow/data/latents
+The cache must contain train_moments.npy, train_moments_flip.npy,
+train_targets.npy and the equivalent three val_ files. No subset is used.
+Your existing IMAGENET_CACHE_PATH, HF_ROOT, VAE_HF_PATH, TORCH_HUB_DIR and
+IMAGENET_FID_NPZ environment variables take precedence over these defaults.
+If a default path is wrong, export the correct variable before submitting.
+Existing W&B login/WANDB_API_KEY is reused; no credential is placed in this kit.
+
+OUTPUTS / MONITOR
+ACTIVE_HOME=$(cat "/scratch/$USER/ptflow/active_pt/latest_B.txt")
+JOB=$(cat "$ACTIVE_HOME/job_id.txt")
+squeue -j "$JOB" -o '%.16i %.30j %.3t %.12M %R'
+tail -F "$ACTIVE_HOME/logs/train_${JOB}.out" "$ACTIVE_HOME/logs/train_${JOB}.err"
+
+# Run separately after training starts:
+cat "$ACTIVE_HOME/run/pt_status.json"
+tail -n 8 "$ACTIVE_HOME/run/pt_status.csv"
+ls -lh "$ACTIVE_HOME/run/checkpoints"
+
+The new directory is:
+  /scratch/$USER/ptflow/active_pt/B_H200x2_30k_TIMESTAMP/
+It contains PT-Flow/ (private code), active_B_30k.yaml, original_base.yaml,
+manifest.json (source/config hashes), job_id.txt, logs/, and run/.
+All checkpoints at 1000, 2000, ... 30000 are retained in run/checkpoints/.
+The final checkpoint is run/checkpoints/state_00030000.pt.
+W&B uses a fresh ID derived from the new workdir, and resumes that ID on requeue.
+All training metrics are also written to run/log/metrics.jsonl.
+Status summaries are saved to run/pt_status.csv and run/pt_status.json.
+
+CHECK THE STARTUP LOG
+Expected initialization message:
+  WEIGHTS_ONLY_INIT source_step=200000 new_step=0 optimizer_states=0
+The synthetic two-rank training check should print:
+  ACTIVE_PT_DDP_PASS: full prox, recovery, scale, remat, and rank synchronization
+These confirm initialization and basic execution, not ImageNet convergence.
+
+RECIPE
+- ImageNet-1k 256x256, cached 32x32x4 latents, base model/MAE configuration.
+- Generator B architecture unchanged; residual=False to match W-Flow weights.
+- 30,000 new optimizer iterations, checkpoints every 1,000.
+- 128 global label groups x 64 generated samples per group = 8,192 samples
+  per generator update. Each of two ranks handles 64 label groups, split into
+  32 accumulation chunks: 2 groups / 128 generated images per microbatch.
+  IMPORTANT: accumulation divides a batch here; it does NOT multiply it.
+  Your earlier train_batch_size=32 recipe generated 2,048 samples/update.
+  This run processes FOUR TIMES that earlier batch per optimizer iteration.
+  No speed improvement is promised by this full-PT recovery recipe.
+- Generator BF16 setting is inherited; generator remat enabled.
+- Real MAE features stream per accumulation group: train.feature_chunk_size=16.
+  Feature forwards use feature.chunk_size=16 and feature.checkpoint=true.
+  The GPU feature cache is disabled. Both settings are needed: chunking an
+  MAE forward alone still concatenates all real features for the entire batch.
+  The earlier kit omitted streaming and OOMed before the first update on H200.
+- Potential and scale FP32, potential remat enabled.
+- Potential/data batch 32 per rank, K=16, scale_K=4, potential chunks of 16.
+- Full prox gradient, including input Hessians; four sampled points per
+  generator microbatch, prox_norm=none. No silent detach fallback.
+- Generator peak LR 2e-5, warmup 1000, cosine to 30000.
+- Potential/scale peak LR 2e-5, warmup 500, cosine to 30000.
+- Potential and scale optimizer steps are attempted every iteration,
+  including when the measured health is broken.
+- Generator FID-50K, CFG 1.2, EMA, every 10k steps. These are Mode-A samples;
+  low Mode-A FID alone does not validate the potential or a likelihood bound.
+
+SCHEDULES (COMPLETED ITERATIONS; THE NEXT UPDATE USES THESE VALUES)
+step      epsilon          lambda_prox
+0         0.100000         0
+1000      0.100000         0
+2000      0.099415         0.020000
+6000      0.086088         0.100000
+11000     0.052500         0.100000
+21000     0.005000         0.100000
+30000     0.005000         0.100000
+
+The first 1000 iterations let the fresh potential train before the generator
+receives its prox penalty. Then lambda ramps over 5000 iterations. Epsilon
+anneals over 20000 iterations after its 1000-iteration warmup.
+The full 30k target is conditional on finite gradients and estimator recovery.
+
+WHAT CHANGED TO ADDRESS THE FAILURE
+The old controller froze potential AND scale optimization when ESS was broken,
+froze epsilon progression, and left the prox term at zero. For the supplied
+checkpoint, only 158 potential optimizer updates had occurred by step 1000.
+Its prox warmup had not finished, but its stalled epsilon counter and frozen
+optimizer indicated a separate estimator/controller problem.
+
+A fresh zero potential has identity prox; an image-producing pretrained
+generator is generally not that prox. The new importance sampler therefore
+chooses the lower-energy start between the generator output and input noise,
+then takes eight backtracked descent steps on phi(y)+||y-x||^2/2. Sampling AND
+proposal density evaluation use that same refined mean. This can improve
+proposal matching; it does not guarantee good high-dimensional importance
+sampling or certify convexity/normalization.
+
+A temporary gradient calibration term trains phi against the CURRENT frozen
+generator pairs: grad phi(m) ~= x-m. Its weight is 0.1 through step 1000 and
+fades to zero at step 5000. This is an additional empirical objective; a
+general generator need not be representable by a scalar prox map. It is not
+an unchanged implementation of the paper's objective or a fixed W-Flow teacher.
+
+Policy active_recovery_v1 advances epsilon/prox by iteration, independently of
+health. The real corrected ESS and health state remain visible. An annealing
+epsilon or positive lambda alone does NOT prove PT is learning successfully.
+The code reports refined proposal ESS and unrefined generator proposal ESS
+separately. High refined ESS does not prove that Mode-A transport is a prox map.
+
+After iteration 1500, 500 consecutive broken-health iterations cause a saved
+checkpoint plus run/PT_FAILED.txt and a failed job. It will NOT spend the rest
+of 30k pretending recovery succeeded. Nonfinite losses/gradients fail directly.
+No learned architecture, threshold, or new recipe can promise the lowest FID.
+
+WATCH THESE METRICS TO JUDGE ACTUAL RECOVERY
+- pt/potential_updated and pt/scale_updated: should remain 1.
+- pt/lambda_prox: actual weight used in the update (positive after warmup).
+- pt/loss_prox and pt/prox_resid_rel: generator/potential agreement.
+- pt/control_ess, pt/ess_ema, pt/health: measured refined estimator health.
+- pt/generator_proposal_control_ess: unrefined generator proposal diagnostic.
+- pt/refine_residual_rms: quality of the local proposal refinement.
+- pt/loss_scale, pt/loss_alignment, pt/g_norm_potential: optimizer diagnostics.
+- FID over training: check that generator quality does not deteriorate.
+Control ESS=(raw ESS/K - 1/K)/(1-1/K). For K=16, the raw floor is 1/16.
+Health thresholds apply to control ESS, not raw ESS/K. These sample estimates
+do not themselves certify theoretical likelihood normalization or bias.
+
+REQUEUE
+Ten minutes before the 72h limit, the batch script requests a checkpoint.
+The trainer saves at the next optimizer boundary, then the script requeues.
+Requeue resumes THIS NEW RUN's generator, PT state, optimizers and schedules.
+It does not reread W-Flow as a resume checkpoint. Failed estimator checks do
+not automatically requeue. Exact sample-for-sample reproduction after requeue
+is not guaranteed because the memory bank/data loader are refilled.
+
+FAILURE LOGS
+ACTIVE_HOME=$(cat "/scratch/$USER/ptflow/active_pt/latest_B.txt")
+JOB=$(cat "$ACTIVE_HOME/job_id.txt")
+sacct -j "$JOB" -X --format=JobID,JobName%26,State,ExitCode,Elapsed,NodeList
+tail -n 120 "$ACTIVE_HOME/logs/train_${JOB}.err"
+tail -n 120 "$ACTIVE_HOME/logs/train_${JOB}.out"
+test ! -f "$ACTIVE_HOME/run/PT_FAILED.txt" || cat "$ACTIVE_HOME/run/PT_FAILED.txt"
+
+VERIFICATION
+Local verification completed: 60 selected tests passed; two-process CPU
+training check passed; both Bash scripts passed bash -n syntax checking.
+After the reported H200 OOM, the memory fix passed 13 targeted tests (including
+streamed vs full-batch PT updates, actual small MAE values/input gradients,
+configuration installation, and the retry command). retry_feature_oom.sh
+passed Bash syntax checking. Peak memory for the real H200 run is unverified.
+Local CPU unit/regression tests cover EMA-only initialization, fresh counters,
+schedule progression under broken health, watchdog behavior, proposal density
+consistency for zero/quadratic potentials, full Hessian gradients, calibration,
+eager/remat equivalence, checkpoints, and the isolated installer. A two-process
+CPU test exercises actual training with synchronized generator/potential/scale.
+No full ImageNet/H200 training or FID benchmark was executed on this Windows PC.
+The submitted allocation repeats the targeted tests and runs the two-rank
+synthetic training check on its actual GPUs before starting the real run.
+
+REPAIR THE ALREADY-INSTALLED RUN THAT FAILED AS JOB 16179458
+retry_feature_oom.sh applies only four feature-memory configuration settings
+inside B_H200x2_30k_20260923_141250, saves a YAML backup/change record, and
+resubmits worker.sbatch. It requires no model/trainer source modifications.
+It refuses duplicate queued jobs or a run that now contains a checkpoint.
+The failed logs are retained and the new job gets separate .out/.err files.
+
+REFERENCES
+Palmetto GPU submission syntax (h200:2) and batch resources:
+https://docs.rcd.clemson.edu/palmetto/job_management/submit/
+PyTorch checkpoint recomputation must match forward execution:
+https://docs.pytorch.org/docs/2.14/checkpoint.html

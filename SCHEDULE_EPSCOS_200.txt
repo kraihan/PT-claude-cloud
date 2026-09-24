@@ -1,0 +1,23 @@
+# Run this block on Palmetto. No upload needed; submits one NEW independent job.
+(
+set -e
+BASE="/scratch/$USER/ptflow"
+SRC="$BASE/submit_pt_pilot200_independent.sh"
+DST="$BASE/submit_pt_epscos200.sh"
+test -s "$SRC"
+grep -Fq 'eps_schedule="constant", eps_max=.1, eps_min=.1' "$SRC"
+grep -Fq 'eps_warmup=0, eps_anneal_steps=200' "$SRC"
+
+sed -e 's/pt-B-pilot200/pt-B-epscos200/g' \
+    -e 's/B_pilot200_/B_epscos200_/g' \
+    -e 's/latest_pilot\.txt/latest_epscos_pilot.txt/g' \
+    -e 's/eps_schedule="constant", eps_max=\.1, eps_min=\.1/eps_schedule="cosine", eps_max=.1, eps_min=.05/' \
+    -e 's/eps_warmup=0, eps_anneal_steps=200/eps_warmup=20, eps_anneal_steps=160/' \
+    -e 's/pt_noise_batch_per_rank=8, eps=\.1,/pt_noise_batch_per_rank=8, eps_schedule="cosine", eps_max=.1, eps_min=.05, eps_warmup=20, eps_anneal_steps=160,/' \
+    -e 's/Epsilon stays 0.1 intentionally, to test tracking before cooling./Epsilon: 0.10 through step 20, cosine to 0.05 at step 180, then held./' \
+    -e 's@bash /scratch/\$USER/ptflow/submit_pt_pilot200.sh@bash /scratch/$USER/ptflow/submit_pt_epscos200.sh@' \
+    "$SRC" > "$DST"
+
+bash -n "$DST"
+bash "$DST"
+)

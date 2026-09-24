@@ -1,0 +1,50 @@
+PT-FLOW: 12-RUN EPS-SCHEDULE, CFG-W, ALPHA_DEF ABLATION
+
+This workflow makes a second isolated checkout. It does not change either:
+  /scratch/$USER/ptflow/PT-Flow
+  /scratch/$USER/ptflow-ablation/PT-Flow
+
+The second path is currently backing the pending K and eps_min jobs, so leave
+it untouched. Upload PT-Flow-12-ablation-kit.zip to your HOME directory:
+  $HOME/PT-Flow-12-ablation-kit.zip
+
+Run exactly:
+
+source ~/ptflow_env.sh
+KIT="$HOME/ptflow-12-kit"
+ZIP="$HOME/PT-Flow-12-ablation-kit.zip"
+mkdir -p "$KIT"
+unzip -o "$ZIP" -d "$KIT"
+
+python "$KIT/install_isolated_ablation.py" \
+  --source "/scratch/$USER/ptflow-ablation/PT-Flow" \
+  --destination "/scratch/$USER/ptflow-ablation-12/PT-Flow" \
+  --overlay "$KIT/overlay"
+
+cd "/scratch/$USER/ptflow-ablation-12/PT-Flow"
+export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
+
+python scripts/run_twelve_ablation.py plan
+python scripts/run_twelve_ablation.py submit
+squeue -u "$USER" -o "%.12i %.32j %.3t %.12M %R"
+
+The study contains 12 final FID-50K tasks:
+
+  epsilon schedule: constant, linear, cosine (ours), exponential
+  CFG w:            1.0, 1.2 (ours), 1.5, 2.0
+  alpha_def:        0.0, 0.01, 0.1, 0.1 -> 0.01 (ours)
+
+There are seven 1K-step training tasks. The five sampling-only tasks reuse the
+central "ours" checkpoint. All tasks request one A100. Slurm may run them in
+parallel as resources become available.
+
+The shortened schedules are scaled to the 1K budget:
+  optimizer warmup=50
+  eps warmup=50, eps anneal=750
+  prox warmup=125, prox ramp=250
+
+Final CSV:
+  /scratch/$USER/ptflow-ablation-12/runs/ablation_imagenet_B_subset50_schedule_w_alpha_1k_fid50k/report/ablation.csv
+
+W&B group:
+  imagenet_B_subset50_schedule_w_alpha_1k_fid50k

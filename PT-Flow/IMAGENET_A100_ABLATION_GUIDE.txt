@@ -1,0 +1,139 @@
+PT-FLOW: IMAGENET LATENT SUBSET ABLATION, ONE A100 40 GB PER JOB
+
+The previous pt6p jobs used CIFAR-10. The reference job 16115380 was allocated
+a P100 12 GB, unsupported by the installed torch 2.14.0+cu130 wheel. Do not use
+--gpu any with that environment. This package requests --gpus=a100:1 and
+--constraint=gpu_a100_40gb. It does not change your PyTorch installation.
+
+Experiment
+----------
+ImageNet-1k, 256x256 images represented by existing SD-VAE 32x32x4 latents.
+Exactly 50 TRAINING examples from EACH of the 1000 classes: 50,000 examples.
+Subset seed 42; sampling without replacement. Identical subset in all arms.
+Original latent cache is preserved. No images are re-encoded. About 1.6 GB
+of extra disk space is needed for the two float32 training latent arrays.
+Validation cache arrays are symlinked to the original cache.
+
+Generator: B/2, width 768, depth 12, 12 heads. This is a smaller model than
+your L/256 run. Fresh initialization, not resuming its L checkpoint.
+MAE-640 features retained. Generator BF16 and activation checkpointing.
+8 labels/step x 16 generated samples/label = 128 generated samples/step.
+8 accumulation steps = 16 generated samples per forward microbatch.
+Potential: width 256, depth 4. Scale network: width 128, depth 2.
+FID generation/decoding batch: 8. 10,000 generated images per screening FID.
+
+Six factors (all other settings held fixed):
+proposal: naive, recentered, diagonal, defensive_diagonal
+eps: 0.02, 0.05, 0.10, 0.20
+K: 4, 8, 16
+lambda_prox_max: 0.0, 0.1, 0.2
+n: 0, 1, 2, 4 (gamma fixed at 0.5)
+cfg_scale: 1.0, 1.2, 1.5, 2.0
+
+11 training configurations x 4000 iterations = 44,000 training iterations.
+17 unique FIDs: 11 training+FID tasks and 6 reference-checkpoint evaluations.
+The 11 training jobs are independent. Six evaluation-only jobs wait for the
+reference checkpoint. Slurm determines how many jobs can actually overlap.
+
+RUN THESE COMMANDS
+------------------
+Upload PT-Flow-imagenet-a100-ablation.zip into /scratch/$USER/ptflow/PT-Flow.
+Keep this SSH terminal open through preparation/smoke, or run inside tmux.
+
+source ~/ptflow_env.sh
+cd /scratch/$USER/ptflow/PT-Flow
+unzip -o PT-Flow-imagenet-a100-ablation.zip
+bash scripts/imagenet_ablation.sh
+
+No command cancels your long ImageNet/CIFAR jobs. The old failed CIFAR
+ablation report job may finish independently; it cannot modify this study.
+
+The script uses your exported IMAGENET_CACHE_PATH as the FULL source cache,
+or /scratch/$USER/ptflow/data/latents if it is unset. Override if necessary:
+
+export IMAGENET_SOURCE_CACHE=/absolute/path/to/existing/full/latent/cache
+
+It honors PTFLOW_ASSETS, PTFLOW_DATA, IMAGENET_FID_NPZ, VAE_HF_PATH, HF_ROOT
+and TORCH_HUB_DIR exported by ~/ptflow_env.sh. Otherwise it uses ../assets
+and ../data, matching the existing ptflow directory layout.
+Optional subset destination override:
+export PTFLOW_SUBSET_CACHE=/absolute/path/to/new/latents_subset50_seed42
+
+Required existing assets
+------------------------
+Source cache: train_moments.npy, train_moments_flip.npy, train_targets.npy,
+              val_moments.npy, val_moments_flip.npy, val_targets.npy.
+VAE_HF_PATH: SD-VAE config.json and its weights.
+HF_ROOT/models/mae/jax/mae_latent_640: metadata.json + ema_params.pt/msgpack.
+IMAGENET_FID_NPZ: ImageNet-256 reference stats (never CIFAR statistics).
+Use the same prepared assets as your existing ImageNet training run.
+
+What the single command does
+----------------------------
+1. Submits ONE CPU setup job and waits: reads the existing cache, selects and
+   copies the balanced training subset, validates assets, saves exact paths.
+2. Submits ONE A100 40 GB smoke job and waits: runs a CUDA kernel check,
+   20 training steps with K=16 and early proximal activation, then checks
+   Mode A and Mode B(n=4) including VAE decoding and FID backend execution.
+   Those 32-sample smoke FIDs are diagnostic only, excluded from the study.
+3. ONLY IF both checks pass, submits 17 one-A100 GPU tasks and one final
+   CPU report job. The terminal returns after submission.
+
+If setup/smoke fails, the full sweep is NOT submitted. Inspect the log paths
+printed by the command. The GPU memory target is conservative but unmeasured
+until the smoke test runs; local CPU tests cannot guarantee actual GPU fit.
+
+MONITOR / RESULTS
+-----------------
+squeue -u "$USER" -o "%.12i %.32j %.3t %.12M %R"
+
+Main experiment:
+/scratch/$USER/ptflow/runs/ablation_imagenet_B_subset50_a100_4k/
+  report/results.csv             17 unique results, including failure status
+  report/ablation.csv            22 factor rows (shared reference repeated)
+  report/rows/<result>.csv       Per-job result, available as each job finishes
+  report/REPORT.md               Readable comparison
+  parallel/logs/<jobid>.err      Scheduler/worker errors
+  logs/train_<arm>.log           Training output
+  logs/eval_<result>.log         Evaluation output
+  configs/<arm>.yaml             Full configuration
+  status/                       Exit status and hardware details
+
+Setup/smoke logs:
+/scratch/$USER/ptflow/runs/ablation_imagenet_B_subset50_a100_4k_setup/
+  prep_<jobid>.log
+  smoke_<jobid>.log
+  smoke_<jobid>/logs/
+  manifest.yaml                  Resolved paths and subset provenance
+  smoke_passed.json
+
+W&B project: ptflow-ablation
+W&B group: imagenet_B_subset50_a100_4k
+Live training metrics plus individual evaluation runs and final CSV artifact.
+Your existing login is reused. Do not put credentials in YAML or shell files.
+
+CSV includes FID, dataset, subset size/seed/index hash, full config JSON,
+the six factors, gamma, training/evaluation seeds, EMA, iteration budget,
+sample count, reference-stat path, backend, ESS/health metrics where logged,
+timings, checkpoint paths and actual GPU. Full subset provenance is saved
+in the subset directory's subset.json and source_train_indices.npy.
+
+For an interim combined report:
+python scripts/run_parallel_ablation.py report \
+  ../runs/ablation_imagenet_B_subset50_a100_4k/parallel/plan.json --sync-wandb
+
+To retry remaining tasks after all submitted jobs have stopped:
+python scripts/run_parallel_ablation.py submit \
+  ../runs/ablation_imagenet_B_subset50_a100_4k/plan.json --gpu a100
+
+Interpretation
+--------------
+This is a 4k-step, reduced-data B/2 screening experiment. Its optimum need not
+transfer to the full-data L/256 model. Report the reduced architecture, data
+budget and one seed explicitly. These are not competitive final ImageNet FIDs.
+Use the same ImageNet reference distribution for all arms; retain all 1000
+classes. Follow up promising settings with longer/full-data runs, more seeds,
+and 50k generated samples for final reporting.
+
+Cluster GPU syntax:
+https://docs.rcd.clemson.edu/palmetto/job_management/submit/

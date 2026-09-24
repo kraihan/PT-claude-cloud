@@ -1,0 +1,42 @@
+PT-FLOW CIFAR-10: 20-ROW, 10K-STEP PARALLEL ABLATION
+
+This workflow creates another isolated checkout. It does not edit the original
+PT-Flow repository or any checkout backing existing jobs.
+
+Upload PT-Flow-cifar20-ablation-kit.zip to your HOME directory, then run:
+
+source ~/ptflow_env.sh
+KIT="$HOME/ptflow-cifar20-kit"
+ZIP="$HOME/PT-Flow-cifar20-ablation-kit.zip"
+mkdir -p "$KIT"
+unzip -o "$ZIP" -d "$KIT"
+
+python "$KIT/install_isolated_ablation.py" \
+  --source "/scratch/$USER/ptflow-ablation-12-fast/PT-Flow" \
+  --destination "/scratch/$USER/ptflow-cifar20/PT-Flow" \
+  --overlay "$KIT/overlay"
+
+cd "/scratch/$USER/ptflow-cifar20/PT-Flow"
+export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
+
+python scripts/run_cifar20_ablation.py plan
+python scripts/run_cifar20_ablation.py submit
+squeue -u "$USER" -o "%.12i %.32j %.3t %.12M %R"
+
+The plan has exactly 20 GPU tasks and 20 final CSV rows. Thirteen unique model
+configurations train for 10,000 steps. Seven tasks evaluate the same central
+checkpoint because CFG w is a sampling parameter and the central configuration
+is deliberately shared across OFAT panels. All 20 tasks are submitted together;
+shared-checkpoint evaluations wait for the central checkpoint.
+
+Every result uses 50,000 generated samples for FID. Final CSV columns are only:
+  ablation,value,fid
+
+Final CSV:
+  /scratch/$USER/ptflow-cifar20/runs/cifar10_20way_10k_fid50k/report/ablation.csv
+
+Full provenance remains separately at:
+  /scratch/$USER/ptflow-cifar20/runs/cifar10_20way_10k_fid50k/report/full_results.csv
+
+W&B group:
+  cifar10_20way_10k_fid50k
